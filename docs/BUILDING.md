@@ -71,5 +71,3 @@ cd /d "%~dp0"
 SpotifyRadio.exe
 pause
 ```
-
-On GitHub: Releases, Draft a new release, pick a tag such as `v1.0`, attach the zip. Release files are stored outside git history, which is why the exes are not in the repository.
