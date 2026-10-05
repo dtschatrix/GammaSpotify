@@ -1,0 +1,359 @@
+--[[
+	Spotify Radio - PDA screen.
+
+	Takes over the PDA "Radio" tab: now playing, transport buttons, search and
+	your playlists. All Spotify traffic goes through spotify_radio.script.
+
+	Set REPLACE_RADIO_TAB to false to get the vanilla radio tab back.
+]]
+
+local REPLACE_RADIO_TAB = true
+
+local XML_FILE   = "ui_spotify_radio.xml"
+local ROWS       = 11
+local ROW_STEP   = 38           -- distance between rows
+local ROW_TEXT   = { x = 46,  y = 278 }   -- must match the row_* templates in the XML
+local ROW_PLAY   = { x = 622, y = 280 }
+local ROW_QUEUE  = { x = 700, y = 280 }
+local MAX_TITLE  = 70           -- characters before a row label is cut
+local MAX_NOW    = 62
+local REFRESH_MS = 250
+local ERROR_MS   = 6000         -- how long an error stays in the status line
+
+local function cut(text, max)
+	text = tostring(text or "")
+	if #text > max then return text:sub(1, max - 3) .. "..." end
+	return text
+end
+
+local function fmt_time(ms)
+	local s = math.floor((ms or 0) / 1000)
+	return string.format("%d:%02d", math.floor(s / 60), s % 60)
+end
+
+local function row_label(item)
+	local label = "[" .. item.kind .. "] " .. item.title
+	if item.subtitle ~= "" then label = label .. " - " .. item.subtitle end
+	return cut(label, MAX_TITLE)
+end
+
+-------------------------------------------------------------------
+-- Search dialog (separate window so the keyboard is not eaten by the PDA)
+-------------------------------------------------------------------
+local SEARCH = nil
+
+class "SpotifySearch" (CUIScriptWnd)
+
+function SpotifySearch:__init() super()
+	self:InitControls()
+	self:InitCallbacks()
+end
+
+function SpotifySearch:__finalize()
+end
+
+function SpotifySearch:InitControls()
+	self:SetWndRect(Frect():set(0, 0, 1024, 768))
+	self:SetAutoDelete(true)
+
+	local xml = CScriptXmlInit()
+	xml:ParseFile(XML_FILE)
+
+	self.dialog = xml:InitStatic("search", self)
+	xml:InitStatic("search:background", self.dialog)
+	xml:InitStatic("search:caption", self.dialog)
+
+	self.input = xml:InitEditBox("search:input", self.dialog)
+	self:Register(self.input, "fld_input")
+
+	self:Register(xml:Init3tButton("search:btn_ok", self.dialog), "btn_ok")
+	self:Register(xml:Init3tButton("search:btn_cancel", self.dialog), "btn_cancel")
+end
+
+function SpotifySearch:InitCallbacks()
+	self:AddCallback("btn_ok", ui_events.BUTTON_CLICKED, self.OnAccept, self)
+	self:AddCallback("btn_cancel", ui_events.BUTTON_CLICKED, self.Close, self)
+	self:AddCallback("fld_input", ui_events.EDIT_TEXT_COMMIT, self.OnAccept, self)
+end
+
+function SpotifySearch:Reset()
+	-- Taking focus makes the engine send a "commit" from the box if it still held focus
+	-- from last time (closed with a button instead of Enter); self.ready ignores that one.
+	self.ready = false
+	self.input:SetText("")
+	self.input:CaptureFocus(true)
+	self.ready = true
+end
+
+function SpotifySearch:Update()
+	CUIScriptWnd.Update(self)
+end
+
+function SpotifySearch:OnAccept()
+	if not self.ready then return end
+	local text = self.input:GetText() or ""
+	text = text:gsub("^%s+", ""):gsub("%s+$", "")
+	self:Close()
+	if text ~= "" then
+		spotify_radio.search(text)
+	end
+end
+
+function SpotifySearch:OnKeyboard(dik, keyboard_action)
+	local res = CUIScriptWnd.OnKeyboard(self, dik, keyboard_action)
+	if res == false and keyboard_action == ui_events.WINDOW_KEY_PRESSED and dik == DIK_keys.DIK_ESCAPE then
+		self:Close()
+	end
+	return res
+end
+
+function SpotifySearch:Close()
+	self.ready = false
+	self.input:CaptureFocus(false)
+	if self:IsShown() then
+		self:HideDialog()
+	end
+	Unregister_UI("SpotifySearch")
+end
+
+function open_search()
+	if not SEARCH then
+		SEARCH = SpotifySearch()
+	end
+	if not SEARCH:IsShown() then
+		SEARCH:ShowDialog(true)
+		SEARCH:Reset()
+		Register_UI("SpotifySearch", "spotify_radio_ui")
+	end
+end
+
+-------------------------------------------------------------------
+-- PDA tab
+-------------------------------------------------------------------
+local SINGLETON = nil
+
+function get_ui()
+	SINGLETON = SINGLETON or SpotifyTab()
+	return SINGLETON
+end
+
+class "SpotifyTab" (CUIScriptWnd)
+
+function SpotifyTab:__init() super()
+	self.rows = {}
+	self.page = 1
+	self.pages = 1
+	self.seen_results = -1
+	self.next_refresh = 0
+	self:InitControls()
+	self:InitCallbacks()
+	self:RenderRows()
+end
+
+function SpotifyTab:__finalize()
+	SINGLETON = nil
+end
+
+function SpotifyTab:InitControls()
+	self:SetWndRect(Frect():set(0, 0, 1024, 768))
+
+	local xml = CScriptXmlInit()
+	xml:ParseFile(XML_FILE)
+
+	xml:InitFrame("frame_head", self)
+	xml:InitFrame("frame_list", self)
+	xml:InitStatic("title", self)
+
+	self.now_playing = xml:InitStatic("now_playing", self):TextControl()
+	self.status      = xml:InitStatic("status", self):TextControl()
+	self.list_title  = xml:InitStatic("list_title", self):TextControl()
+
+	local function button(name)
+		local btn = xml:Init3tButton(name, self)
+		self:Register(btn, name)
+		return btn
+	end
+
+	self.btn_prev  = button("btn_prev")
+	self.btn_play  = button("btn_play")
+	self.btn_pause = button("btn_pause")
+	self.btn_next  = button("btn_next")
+	button("btn_vol_down")
+	button("btn_vol_up")
+	button("btn_shuffle")
+	button("btn_search")
+	button("btn_playlists")
+	self.btn_page_prev = button("btn_page_prev")
+	self.btn_page_next = button("btn_page_next")
+	self.btn_pause:Show(false)
+
+	for i = 1, ROWS do
+		local dy = (i - 1) * ROW_STEP
+
+		local st = xml:InitStatic("row_text", self)
+		st:SetWndPos(vector2():set(ROW_TEXT.x, ROW_TEXT.y + dy))
+
+		local play = xml:Init3tButton("row_play", self)
+		play:SetWndPos(vector2():set(ROW_PLAY.x, ROW_PLAY.y + dy))
+		self:Register(play, "row_play_" .. i)
+
+		local queue = xml:Init3tButton("row_queue", self)
+		queue:SetWndPos(vector2():set(ROW_QUEUE.x, ROW_QUEUE.y + dy))
+		self:Register(queue, "row_queue_" .. i)
+
+		self.rows[i] = { st = st, text = st:TextControl(), play = play, queue = queue }
+	end
+end
+
+function SpotifyTab:InitCallbacks()
+	local function click(name, fn)
+		self:AddCallback(name, ui_events.BUTTON_CLICKED, fn, self)
+	end
+
+	-- place_here: for the switched-off world mode (moves the radio to the player); does nothing in head mode
+	click("btn_prev",      function() spotify_radio_stream.place_here(); spotify_radio.send("prev") end)
+	click("btn_play",      function() spotify_radio_stream.place_here(); spotify_radio.send("play") end)
+	click("btn_pause",     function() spotify_radio.send("pause") end)
+	click("btn_next",      function() spotify_radio_stream.place_here(); spotify_radio.send("next") end)
+	click("btn_vol_down",  function() spotify_radio.send("volrel -10") end)
+	click("btn_vol_up",    function() spotify_radio.send("volrel 10") end)
+	click("btn_shuffle",   function()
+		spotify_radio.send("shuffle " .. (spotify_radio.state.shuffle and "off" or "on"))
+	end)
+	click("btn_search",    function() open_search() end)
+	click("btn_playlists", function() spotify_radio.request_playlists() end)
+	click("btn_page_prev", function() self:SetPage(self.page - 1) end)
+	click("btn_page_next", function() self:SetPage(self.page + 1) end)
+
+	for i = 1, ROWS do
+		click("row_play_" .. i,  function() self:OnRow(i, false) end)
+		click("row_queue_" .. i, function() self:OnRow(i, true) end)
+	end
+end
+
+function SpotifyTab:ItemAt(row)
+	return spotify_radio.results[(self.page - 1) * ROWS + row]
+end
+
+function SpotifyTab:OnRow(row, queue)
+	local item = self:ItemAt(row)
+	if not item then return end
+	if queue then
+		spotify_radio.queue_uri(item.uri)
+	else
+		spotify_radio_stream.place_here()
+		spotify_radio.play_uri(item.uri)
+	end
+end
+
+function SpotifyTab:SetPage(page)
+	if page < 1 or page > self.pages then return end
+	self.page = page
+	self:RenderRows()
+end
+
+function SpotifyTab:RenderRows()
+	local results = spotify_radio.results
+	self.pages = math.max(1, math.ceil(#results / ROWS))
+	if self.page > self.pages then self.page = self.pages end
+
+	for i = 1, ROWS do
+		local row, item = self.rows[i], self:ItemAt(i)
+		if item then
+			row.text:SetText(row_label(item))
+		end
+		row.st:Show(item ~= nil)
+		row.play:Show(item ~= nil)
+		row.queue:Show(item ~= nil and item.kind == "track")
+	end
+
+	local title
+	if self.seen_results <= 0 and #results == 0 then
+		title = "Search, or open one of your playlists"
+	elseif #results == 0 then
+		title = "Nothing found: " .. cut(spotify_radio.results_title, 22)
+	else
+		title = cut(spotify_radio.results_title, 22) .. "  (" .. #results .. ")"
+		if self.pages > 1 then title = title .. "  page " .. self.page .. "/" .. self.pages end
+	end
+	self.list_title:SetText(title)
+	self.btn_page_prev:Show(self.pages > 1)
+	self.btn_page_next:Show(self.pages > 1)
+end
+
+function SpotifyTab:Refresh()
+	local s = spotify_radio.state
+	local now = time_global()
+
+	-- top line
+	local line
+	if s.status == "offline" then
+		line = "Not connected"
+	elseif s.status == "nodevice" then
+		line = "Nothing active - open the Spotify app"
+	elseif s.title == "" then
+		line = "Nothing playing"
+	else
+		line = s.artist ~= "" and (s.artist .. " - " .. s.title) or s.title
+	end
+	self.now_playing:SetText(cut(line, MAX_NOW))
+
+	-- status line
+	local status
+	if spotify_radio.last_error ~= "" and now - spotify_radio.last_error_at < ERROR_MS then
+		status = "! " .. spotify_radio.last_error
+	elseif s.status == "offline" then
+		status = "Waiting for the daemon - start run.bat in spotify-radio-daemon"
+	else
+		local parts = {}
+		if s.duration > 0 then
+			local pos = s.progress
+			if s.status == "playing" then pos = math.min(s.duration, pos + (now - s.received_at)) end
+			parts[#parts + 1] = fmt_time(pos) .. " / " .. fmt_time(s.duration)
+		end
+		if s.status == "paused" then parts[#parts + 1] = "paused" end
+		if s.volume >= 0 then parts[#parts + 1] = "vol " .. s.volume .. "%" end
+		if s.shuffle then parts[#parts + 1] = "shuffle" end
+		if s.device ~= "" then parts[#parts + 1] = cut(s.device, 20) end
+		status = table.concat(parts, "   ")
+	end
+	self.status:SetText(cut(status, 78))
+
+	local playing = s.status == "playing"
+	self.btn_play:Show(not playing)
+	self.btn_pause:Show(playing)
+
+	if spotify_radio.results_version ~= self.seen_results then
+		self.seen_results = spotify_radio.results_version
+		self.page = 1
+		self:RenderRows()
+	end
+end
+
+function SpotifyTab:Update()
+	CUIScriptWnd.Update(self)
+	local now = time_global()
+	if now < self.next_refresh then return end
+	self.next_refresh = now + REFRESH_MS
+	self:Refresh()
+end
+
+-------------------------------------------------------------------
+-- Hook into the PDA
+-------------------------------------------------------------------
+local patched = false
+
+function on_game_start()
+	if not REPLACE_RADIO_TAB or patched then return end
+	patched = true
+
+	local original = pda.set_active_subdialog
+	pda.set_active_subdialog = function(section)
+		if section == "eptRadio" then
+			spotify_radio.on_tab_opened()
+			spotify_radio_stream.retry()
+			return get_ui()
+		end
+		return original(section)
+	end
+end

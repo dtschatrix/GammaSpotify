@@ -1,0 +1,423 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+
+namespace SpotifyRadio;
+
+/// <summary>
+/// Line protocol for the game, one command per line, tab-separated replies.
+///   game -> daemon: hello | ping | state | toggle | play | pause | next | prev | vol N | volrel +-N |
+///                   shuffle on|off | search TEXT | playlists | playuri URI | queue URI |
+///                   stream start MODE FOLDER | stream stop | log TEXT
+///   daemon -> game: hello | pong | state ... | ok CMD | error MSG | results_begin / result / results_end |
+///                   chunk NAME MS INDEX | stream started|stopped|failed|unavailable
+///
+/// Two transports carry the same lines:
+///   - TCP on 127.0.0.1 (only usable when the game exposes LuaSocket, i.e. lua_debug 1)
+///   - two text files in the game's appdata folder (works everywhere, used by default)
+/// </summary>
+public sealed class GameServer
+{
+    private interface ILink
+    {
+        string Name { get; }
+        bool Active { get; }
+        Task WriteAsync(byte[] line, CancellationToken ct);
+    }
+
+    private sealed class TcpLink : ILink
+    {
+        private readonly SemaphoreSlim _gate = new(1, 1);
+        public required TcpClient Tcp { get; init; }
+        public required NetworkStream Stream { get; init; }
+        public required int Id { get; init; }
+        public string Name => $"tcp #{Id}";
+        public bool Active => true;
+
+        public async Task WriteAsync(byte[] line, CancellationToken ct)
+        {
+            await _gate.WaitAsync(ct);
+            try { await Stream.WriteAsync(line, ct); }
+            catch (IOException) { /* reader loop cleans up */ }
+            finally { _gate.Release(); }
+        }
+    }
+
+    private sealed class FileLink : ILink
+    {
+        private static readonly TimeSpan IdleAfter = TimeSpan.FromSeconds(30);
+        private readonly SemaphoreSlim _gate = new(1, 1);
+        public required string OutPath { get; init; }
+        public DateTime LastCommandUtc { get; set; } = DateTime.MinValue;
+        public string Name => "file";
+        public bool Active => DateTime.UtcNow - LastCommandUtc < IdleAfter;
+
+        public async Task WriteAsync(byte[] line, CancellationToken ct)
+        {
+            await _gate.WaitAsync(ct);
+            try
+            {
+                // Opened per write so the game can always read it; retry if the game has it open at this instant.
+                for (var attempt = 0; ; attempt++)
+                {
+                    try
+                    {
+                        using var fs = new FileStream(OutPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                        fs.Write(line);
+                        return;
+                    }
+                    catch (IOException) when (attempt < 5) { await Task.Delay(20, ct); }
+                }
+            }
+            finally { _gate.Release(); }
+        }
+    }
+
+    public const string CmdFileName = "spotify_radio_cmd.txt";
+    public const string OutFileName = "spotify_radio_out.txt";
+    private const long MaxFileBytes = 1024 * 1024;
+
+    private readonly Config _cfg;
+    private readonly SpotifyClient _spotify;
+    private readonly TextCodec _codec;
+    private readonly ConcurrentDictionary<int, TcpLink> _tcpLinks = new();
+    private FileLink? _fileLink;
+    private bool _fileWasActive;
+
+    /// <summary>Set by Program once both objects exist.</summary>
+    public GameAudio? Audio { get; set; }
+
+    public bool GameIsThere => ActiveLinks().Any();
+
+    public async Task BroadcastAsync(string[] fields, CancellationToken ct)
+    {
+        foreach (var link in ActiveLinks().ToList())
+            await SendAsync(link, ct, fields);
+    }
+    private string _lastSignature = "";
+    private string _lastPollError = "";
+    private int _nextId;
+
+    public GameServer(Config cfg, SpotifyClient spotify, TextCodec codec)
+    {
+        _cfg = cfg;
+        _spotify = spotify;
+        _codec = codec;
+    }
+
+    private IEnumerable<ILink> ActiveLinks()
+    {
+        foreach (var l in _tcpLinks.Values) yield return l;
+        if (_fileLink is { Active: true } f) yield return f;
+    }
+
+    public async Task RunAsync(CancellationToken ct)
+    {
+        _ = Task.Run(() => PollLoopAsync(ct), ct);
+        if (!string.IsNullOrWhiteSpace(_cfg.IpcDir))
+            _ = Task.Run(() => FileLoopAsync(_cfg.IpcDir, ct), ct);
+        else
+            Log.Info("ipcDir is not set in config.json - file link disabled, TCP only.");
+
+        var listener = new TcpListener(IPAddress.Loopback, _cfg.GamePort);
+        try
+        {
+            listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            listener.Start();
+            Log.Info($"Waiting for the game (TCP 127.0.0.1:{_cfg.GamePort}).");
+        }
+        catch (SocketException e)
+        {
+            // The file link does not need the port, so this is not fatal.
+            Log.Info($"TCP port {_cfg.GamePort} is unavailable ({e.Message}); file link only.");
+            try { await Task.Delay(Timeout.Infinite, ct); } catch (OperationCanceledException) { }
+            return;
+        }
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var tcp = await listener.AcceptTcpClientAsync(ct);
+                tcp.NoDelay = true;
+                var link = new TcpLink { Tcp = tcp, Stream = tcp.GetStream(), Id = Interlocked.Increment(ref _nextId) };
+                _tcpLinks[link.Id] = link;
+                Log.Info($"Game connected ({link.Name}).");
+                _ = Task.Run(() => ServeTcpAsync(link, ct), ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally { listener.Stop(); }
+    }
+
+    private async Task ServeTcpAsync(TcpLink link, CancellationToken ct)
+    {
+        try
+        {
+            using var reader = new StreamReader(link.Stream, _codec.Incoming, false, 4096, leaveOpen: true);
+            while (!ct.IsCancellationRequested)
+            {
+                var line = await reader.ReadLineAsync().WaitAsync(ct);
+                if (line is null) break;
+                line = line.Trim();
+                if (line.Length == 0) continue;
+                await HandleAsync(link, line, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (IOException) { }
+        catch (SocketException) { }
+        catch (Exception e) { Log.Info($"{link.Name} error: {e.Message}"); }
+        finally
+        {
+            _tcpLinks.TryRemove(link.Id, out _);
+            link.Tcp.Dispose();
+            Log.Info($"Game disconnected ({link.Name}).");
+        }
+    }
+
+    /// <summary>Tails the command file the game appends to; replies are appended to the out file.</summary>
+    private async Task FileLoopAsync(string dir, CancellationToken ct)
+    {
+        string cmdPath, outPath;
+        try
+        {
+            Directory.CreateDirectory(dir);
+            cmdPath = Path.Combine(dir, CmdFileName);
+            outPath = Path.Combine(dir, OutFileName);
+            // Old commands are never replayed; the files only get reset when they have grown large.
+            if (!File.Exists(cmdPath) || new FileInfo(cmdPath).Length > MaxFileBytes) File.WriteAllBytes(cmdPath, Array.Empty<byte>());
+            if (!File.Exists(outPath) || new FileInfo(outPath).Length > MaxFileBytes) File.WriteAllBytes(outPath, Array.Empty<byte>());
+        }
+        catch (Exception e)
+        {
+            Log.Info($"File link disabled, cannot use \"{dir}\": {e.Message}");
+            return;
+        }
+
+        var link = new FileLink { OutPath = outPath };
+        _fileLink = link;
+        var offset = new FileInfo(cmdPath).Length;
+        var pending = new List<byte>();
+        Log.Info($"Waiting for the game (files in {dir}).");
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(50, ct);
+                if (_fileWasActive && !link.Active)
+                {
+                    _fileWasActive = false;
+                    Log.Info("Game went quiet (file link).");
+                }
+
+                var info = new FileInfo(cmdPath);
+                if (!info.Exists) { offset = 0; continue; }
+                if (info.Length < offset) { offset = 0; pending.Clear(); }
+                if (info.Length == offset) continue;
+
+                byte[] chunk;
+                using (var fs = new FileStream(cmdPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    fs.Seek(offset, SeekOrigin.Begin);
+                    chunk = new byte[fs.Length - offset];
+                    var read = fs.Read(chunk, 0, chunk.Length);
+                    if (read < chunk.Length) Array.Resize(ref chunk, read);
+                    offset += read;
+                }
+                pending.AddRange(chunk);
+
+                int nl;
+                while ((nl = pending.IndexOf((byte)'\n')) >= 0)
+                {
+                    var line = _codec.Incoming.GetString(pending.GetRange(0, nl).ToArray()).Trim();
+                    pending.RemoveRange(0, nl + 1);
+                    if (line.Length == 0) continue;
+                    link.LastCommandUtc = DateTime.UtcNow;
+                    if (!_fileWasActive)
+                    {
+                        _fileWasActive = true;
+                        Log.Info("Game connected (file link).");
+                    }
+                    await HandleAsync(link, line, ct);
+                }
+            }
+            catch (OperationCanceledException) { return; }
+            catch (IOException) { /* file busy for a moment; try again next tick */ }
+            catch (Exception e) { Log.Info("File link error: " + e.Message); }
+        }
+    }
+
+    private async Task HandleAsync(ILink link, string line, CancellationToken ct)
+    {
+        var space = line.IndexOf(' ');
+        var cmd = (space < 0 ? line : line[..space]).ToLowerInvariant();
+        var arg = space < 0 ? "" : line[(space + 1)..].Trim();
+        if (cmd == "ping")
+        {
+            await SendAsync(link, ct, "pong");
+            return;
+        }
+        if (cmd == "log")
+        {
+            Log.Info("   game: " + arg);
+            return;
+        }
+        if (cmd == "stream")
+        {
+            // stream start <world|head> <folder>  |  stream stop
+            Log.Info($"<- {line}");
+            try
+            {
+                var parts = arg.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 3 && parts[0] == "start" && Audio is not { Installed: true })
+                {
+                    // no librespot: the game stays a remote control, without an error message
+                    await SendAsync(link, ct, "stream", "unavailable");
+                }
+                else if (parts.Length == 3 && parts[0] == "start")
+                {
+                    await Audio!.StartStreamAsync(parts[1], parts[2], ct);
+                    await SendAsync(link, ct, "stream", "started", parts[1]);
+                }
+                else if (Audio is not null)
+                {
+                    await Audio.StopStreamAsync(ct);
+                    await SendAsync(link, ct, "stream", "stopped");
+                }
+                _ = RefreshSoonAsync(ct);
+            }
+            catch (Exception e) when (e is SpotifyException or InvalidOperationException or HttpRequestException or IOException)
+            {
+                Log.Info($"   error: {e.Message}");
+                await SendAsync(link, ct, "stream", "failed");
+                await SendAsync(link, ct, "error", e.Message);
+            }
+            return;
+        }
+        Log.Info($"<- {line}");
+        try
+        {
+            switch (cmd)
+            {
+                case "hello":
+                    await SendAsync(link, ct, "hello", "SpotifyRadio", "1");
+                    await SendStateAsync(link, await _spotify.GetStateAsync(ct), ct);
+                    return;
+                case "state":
+                    await SendStateAsync(link, await _spotify.GetStateAsync(ct), ct);
+                    return;
+                case "toggle":
+                    if ((await _spotify.GetStateAsync(ct)).Status == "playing") await _spotify.PauseAsync(ct);
+                    else await _spotify.PlayAsync(ct);
+                    break;
+                case "play": await _spotify.PlayAsync(ct); break;
+                case "pause": await _spotify.PauseAsync(ct); break;
+                case "next": await _spotify.NextAsync(ct); break;
+                case "prev": await _spotify.PreviousAsync(ct); break;
+                case "vol":
+                    await _spotify.SetVolumeAsync(ParseInt(arg), ct);
+                    break;
+                case "volrel":
+                {
+                    var current = (await _spotify.GetStateAsync(ct)).Volume;
+                    if (current < 0) throw new SpotifyException("No active Spotify device to set volume on");
+                    await _spotify.SetVolumeAsync(current + ParseInt(arg), ct);
+                    break;
+                }
+                case "shuffle":
+                    await _spotify.SetShuffleAsync(arg is "on" or "1" or "true", ct);
+                    break;
+                case "playuri":
+                    await _spotify.PlayUriAsync(arg, ct);
+                    break;
+                case "queue":
+                    await _spotify.QueueAsync(arg, ct);
+                    break;
+                case "search":
+                    if (arg.Length == 0) throw new SpotifyException("Empty search");
+                    await SendResultsAsync(link, arg, await _spotify.SearchAsync(arg, ct), ct);
+                    return;
+                case "playlists":
+                    await SendResultsAsync(link, "playlists", await _spotify.MyPlaylistsAsync(ct), ct);
+                    return;
+                default:
+                    throw new SpotifyException("Unknown command: " + cmd);
+            }
+            await SendAsync(link, ct, "ok", cmd);
+            _ = RefreshSoonAsync(ct);
+        }
+        catch (Exception e) when (e is SpotifyException or InvalidOperationException or HttpRequestException or FormatException or TaskCanceledException && !ct.IsCancellationRequested)
+        {
+            var msg = e is TaskCanceledException ? "Spotify did not answer in time" : e.Message;
+            Log.Info($"   error: {msg}");
+            await SendAsync(link, ct, "error", msg);
+        }
+    }
+
+    private static int ParseInt(string s) =>
+        int.TryParse(s, out var n) ? n : throw new FormatException("Expected a number, got: " + s);
+
+    private async Task SendResultsAsync(ILink link, string title, List<SearchItem> items, CancellationToken ct)
+    {
+        // One write for the whole listing so the game never sees half of it.
+        var sb = new StringBuilder();
+        sb.Append(Format("results_begin", title));
+        for (var i = 0; i < items.Count; i++)
+            sb.Append(Format("result", (i + 1).ToString(), items[i].Kind, items[i].Uri, items[i].Title, items[i].Subtitle));
+        sb.Append(Format("results_end", items.Count.ToString()));
+        await link.WriteAsync(_codec.Wire.GetBytes(sb.ToString()), ct);
+    }
+
+    private Task SendStateAsync(ILink link, PlayerState s, CancellationToken ct) =>
+        SendAsync(link, ct, "state", s.Status, s.Artist, s.Title, s.ProgressMs.ToString(), s.DurationMs.ToString(),
+            s.Volume.ToString(), s.Device, s.Shuffle ? "1" : "0", s.Uri);
+
+    private string Format(params string[] fields) => string.Join('\t', fields.Select(_codec.Clean)) + "\n";
+
+    private Task SendAsync(ILink link, CancellationToken ct, params string[] fields) =>
+        link.WriteAsync(_codec.Wire.GetBytes(Format(fields)), ct);
+
+    /// <summary>Spotify takes a moment to apply a command; push the new state shortly after.</summary>
+    private async Task RefreshSoonAsync(CancellationToken ct)
+    {
+        try
+        {
+            await Task.Delay(600, ct);
+            await PollOnceAsync(force: true, ct);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception e) { Log.Info("Refresh failed: " + e.Message); }
+    }
+
+    private async Task PollLoopAsync(CancellationToken ct)
+    {
+        var interval = TimeSpan.FromSeconds(Math.Max(1, _cfg.PollSeconds));
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(interval, ct);
+                if (!ActiveLinks().Any()) continue; // don't hit the API while the game isn't there
+                await PollOnceAsync(force: false, ct);
+                _lastPollError = "";
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            catch (Exception e)
+            {
+                if (e.Message != _lastPollError) Log.Info("Poll failed: " + e.Message);
+                _lastPollError = e.Message;
+            }
+        }
+    }
+
+    private async Task PollOnceAsync(bool force, CancellationToken ct)
+    {
+        var state = await _spotify.GetStateAsync(ct);
+        if (!force && state.Signature == _lastSignature) return;
+        _lastSignature = state.Signature;
+        foreach (var link in ActiveLinks().ToList())
+            await SendStateAsync(link, state, ct);
+    }
+}

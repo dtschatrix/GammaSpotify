@@ -1,0 +1,434 @@
+--[[
+	Spotify Radio - game side.
+
+	Talks to the Spotify Radio daemon; the daemon talks to Spotify. This script is the remote
+	control (state, search, playlists, transport). spotify_radio_stream.script plays the music
+	through the game engine.
+
+	Link to the daemon: two text files in the game's appdata folder
+	(spotify_radio_cmd.txt = commands from the game, spotify_radio_out.txt = replies).
+	The engine only exposes LuaSocket when "lua_debug 1" is set, so files are the default;
+	set PREFER_SOCKET = true to use TCP instead when it is available.
+
+	Other scripts can use:
+		spotify_radio.send("next")            -- any daemon command
+		spotify_radio.search("burial")        -- results arrive in spotify_radio.results
+		spotify_radio.play_uri(uri)
+		spotify_radio.subscribe(function(event, data) ... end)   -- "state" / "results" / "error"
+
+	The PDA screen lives in spotify_radio_ui.script.
+]]
+
+-- ===================================================================== settings
+local PREFER_SOCKET = false
+local HOST = "127.0.0.1"
+local PORT = 47800               -- must match gamePort in the daemon's config.json
+
+local CMD_FILE = "spotify_radio_cmd.txt"   -- in appdata; must match the daemon
+local OUT_FILE = "spotify_radio_out.txt"
+
+-- Optional hotkeys, off by default (everything is in the PDA radio tab).
+-- Example: toggle = "DIK_F6". Actions: toggle, next, prev, vol_up, vol_down, show.
+local KEYS = {
+}
+local VOLUME_STEP     = 10
+local PUMP_MS         = 150      -- how often replies are read
+local PING_MS         = 4000     -- file link: how often the daemon is pinged
+local ALIVE_MS        = 12000    -- file link: daemon counts as gone after this much silence
+local CONNECT_TIMEOUT = 0.02     -- socket link: seconds
+local RETRY_MS        = 10000    -- socket link: pause between automatic connection attempts
+local MAX_AUTO_TRIES  = 6
+
+-- ===================================================================== state
+state = {
+	status = "offline",          -- offline | playing | paused | idle | nodevice
+	artist = "", title = "", uri = "",
+	progress = 0, duration = 0,  -- ms
+	volume = -1, device = "", shuffle = false,
+	received_at = 0,             -- time_global() of the last update
+}
+results = {}                     -- last search / playlist listing: { {kind=, uri=, title=, subtitle=}, ... }
+results_title = ""
+results_version = 0              -- bumped whenever results change
+last_error = ""
+last_error_at = 0                -- time_global() of the last error
+link_mode = "none"               -- none | file | socket (for display)
+
+local rx = ""
+local pending_results
+local next_pump_at = 0
+local listeners = {}
+local key_to_action = {}
+local announce_next_state = false
+
+-- file link
+local cmd_path, out_path
+local out_offset = 0
+local alive = false
+local last_rx_at = 0
+local next_ping_at = 0
+
+-- socket link
+local sock_lib, sock_lib_failed
+local sock
+local next_connect_at = 0
+local auto_tries = 0
+
+-- ===================================================================== helpers
+local function log(msg)
+	printf("[spotify_radio] %s", tostring(msg))
+end
+
+local function show(msg)
+	log(msg)
+	if not (db and db.actor) then return end
+	local ok = pcall(function() actor_menu.set_msg(1, msg, 4) end)
+	if not ok then
+		pcall(function() news_manager.send_tip(db.actor, msg, nil, nil, 5000) end)
+	end
+end
+
+local function set_error(msg)
+	last_error, last_error_at = msg, time_global()
+end
+
+local function notify(event, data)
+	for i = 1, #listeners do
+		local ok, err = pcall(listeners[i], event, data)
+		if not ok then log("listener error: " .. tostring(err)) end
+	end
+end
+
+local function split_tabs(line)
+	local t = {}
+	for field in (line .. "\t"):gmatch("(.-)\t") do
+		t[#t + 1] = field
+	end
+	return t
+end
+
+function now_playing_text()
+	if state.status == "offline" then return "Spotify: daemon not connected" end
+	if state.status == "nodevice" then return "Spotify: nothing active - open the Spotify app" end
+	if state.title == "" then return "Spotify: nothing playing" end
+	local name = state.artist ~= "" and (state.artist .. " - " .. state.title) or state.title
+	if state.status == "paused" then return "Spotify (paused): " .. name end
+	return "Spotify: " .. name
+end
+
+local function go_offline(reason)
+	if state.status ~= "offline" then log("daemon link lost: " .. tostring(reason)) end
+	rx = ""
+	pending_results = nil
+	state.status = "offline"
+	notify("state", state)
+end
+
+-- ===================================================================== protocol
+local function on_state(f)
+	local old_uri, old_status = state.uri, state.status
+	state.status   = f[2] or "idle"
+	state.artist   = f[3] or ""
+	state.title    = f[4] or ""
+	state.progress = tonumber(f[5]) or 0
+	state.duration = tonumber(f[6]) or 0
+	state.volume   = tonumber(f[7]) or -1
+	state.device   = f[8] or ""
+	state.shuffle  = f[9] == "1"
+	state.uri      = f[10] or ""
+	state.received_at = time_global()
+
+	local track_changed = state.uri ~= old_uri and state.uri ~= "" and state.status == "playing"
+	local resumed = old_status ~= "playing" and state.status == "playing" and old_status ~= "offline"
+	if announce_next_state or track_changed or resumed then
+		announce_next_state = false
+		show(now_playing_text())
+	end
+	notify("state", state)
+end
+
+local function handle_line(line)
+	local f = split_tabs(line)
+	local kind = f[1]
+	if kind == "state" then
+		on_state(f)
+	elseif kind == "error" then
+		announce_next_state = false
+		set_error(f[2] or "Spotify: error")
+		show(last_error)
+		notify("error", f[2])
+	elseif kind == "results_begin" then
+		pending_results = { title = f[2] or "", items = {} }
+	elseif kind == "result" and pending_results then
+		local items = pending_results.items
+		items[#items + 1] = { kind = f[3] or "", uri = f[4] or "", title = f[5] or "", subtitle = f[6] or "" }
+	elseif kind == "results_end" and pending_results then
+		results, results_title = pending_results.items, pending_results.title
+		results_version = results_version + 1
+		pending_results = nil
+		log(string.format("%d results for '%s'", #results, results_title))
+		notify("results", results)
+	elseif kind == "hello" then
+		log("daemon says hello (protocol " .. tostring(f[3]) .. ")")
+	elseif kind ~= "pong" and kind ~= "ok" then
+		notify("line", f)                -- anything else is for other scripts (spotify_radio_stream)
+	end
+end
+
+local function consume_lines()
+	while true do
+		local nl = rx:find("\n", 1, true)
+		if not nl then break end
+		local line = rx:sub(1, nl - 1)
+		rx = rx:sub(nl + 1)
+		if line:sub(-1) == "\r" then line = line:sub(1, -2) end
+		if line ~= "" then
+			local ok, perr = pcall(handle_line, line)
+			if not ok then log("bad line from daemon: " .. tostring(perr)) end
+		end
+	end
+end
+
+-- ===================================================================== file link
+local function file_init()
+	local fs = getFS()
+	cmd_path = fs:update_path("$app_data_root$", CMD_FILE)
+	out_path = fs:update_path("$app_data_root$", OUT_FILE)
+	-- skip whatever an earlier session left in the reply file
+	local f = io.open(out_path, "rb")
+	if f then
+		out_offset = f:seek("end") or 0
+		f:close()
+	end
+	link_mode = "file"
+	log("file link: " .. tostring(cmd_path))
+end
+
+local function file_write(line)
+	local f, err = io.open(cmd_path, "a")
+	if not f then
+		set_error("Cannot write " .. CMD_FILE)
+		log("cannot open " .. tostring(cmd_path) .. ": " .. tostring(err))
+		return false
+	end
+	f:write(line, "\n")
+	f:close()
+	return true
+end
+
+local function file_pump(now)
+	local f = io.open(out_path, "rb")
+	if f then
+		local size = f:seek("end") or 0
+		if size < out_offset then out_offset = 0 end          -- daemon reset the file
+		if size > out_offset then
+			f:seek("set", out_offset)
+			local data = f:read(size - out_offset)
+			if data and #data > 0 then
+				out_offset = out_offset + #data
+				rx = rx .. data
+				last_rx_at = now
+				if not alive then
+					alive = true
+					log("daemon is answering")
+					file_write("hello")
+				end
+			end
+		end
+		f:close()
+	end
+	consume_lines()
+
+	if alive and now - last_rx_at > ALIVE_MS then
+		alive = false
+		go_offline("no answer")
+	end
+	if now >= next_ping_at then
+		next_ping_at = now + PING_MS
+		file_write("ping")
+	end
+end
+
+-- ===================================================================== socket link
+local function load_lib()
+	if sock_lib then return sock_lib end
+	if sock_lib_failed then return nil end
+	local ok, lib = pcall(require, "socket.core")
+	if ok and type(lib) == "table" and lib.tcp then
+		sock_lib = lib
+		return lib
+	end
+	sock_lib_failed = true
+	log("LuaSocket is not available, using the file link")
+	return nil
+end
+
+local function sock_drop(reason)
+	if sock then
+		pcall(function() sock:close() end)
+		sock = nil
+	end
+	go_offline(reason)
+end
+
+local function sock_connect()
+	if sock then return true end
+	local s = sock_lib.tcp()
+	if not s then return false end
+	s:settimeout(CONNECT_TIMEOUT)
+	if not s:connect(HOST, PORT) then
+		s:close()
+		return false
+	end
+	s:settimeout(0)
+	pcall(function() s:setoption("tcp-nodelay", true) end)
+	sock = s
+	rx = ""
+	auto_tries = 0
+	log("connected to daemon on " .. HOST .. ":" .. PORT)
+	sock:send("hello\n")
+	return true
+end
+
+local function sock_pump(now)
+	if not sock then
+		if auto_tries < MAX_AUTO_TRIES and now >= next_connect_at then
+			auto_tries = auto_tries + 1
+			next_connect_at = now + RETRY_MS
+			sock_connect()
+		end
+		return
+	end
+	while sock do
+		local data, err, partial = sock:receive(4096)
+		local chunk = data or partial
+		if chunk and #chunk > 0 then rx = rx .. chunk end
+		if err and err ~= "timeout" then
+			sock_drop(err)
+			return
+		end
+		if not data then break end
+	end
+	consume_lines()
+end
+
+-- ===================================================================== link selection
+local function ensure_link()
+	if link_mode ~= "none" then return end
+	if PREFER_SOCKET and load_lib() then
+		link_mode = "socket"
+		log("socket link: " .. HOST .. ":" .. PORT)
+	else
+		file_init()
+	end
+end
+
+local function raw_send(line)
+	ensure_link()
+	if link_mode == "socket" then
+		if not sock and not sock_connect() then return false end
+		local sent, err = sock:send(line .. "\n")
+		if not sent and err ~= "timeout" then
+			sock_drop(err)
+			return false
+		end
+		return true
+	end
+	return file_write(line) and alive
+end
+
+-- ===================================================================== public API
+function is_connected()
+	if link_mode == "socket" then return sock ~= nil end
+	return alive
+end
+
+function send(cmd)
+	if not raw_send(cmd) then
+		if last_error == "" or time_global() - last_error_at > 1000 then
+			set_error("Daemon is not running - start run.bat")
+		end
+		show("Spotify: daemon is not running")
+		return false
+	end
+	return true
+end
+
+-- Like send(), but never nags the player when the daemon is away.
+function tell(cmd)
+	return raw_send(cmd)
+end
+
+-- Called when the PDA tab opens: refresh what is playing, without nagging if the daemon is down.
+function on_tab_opened()
+	raw_send(is_connected() and "state" or "hello")
+end
+
+function search(query)
+	query = tostring(query or ""):gsub("[\t\r\n]", " ")
+	return send("search " .. query)
+end
+
+function play_uri(uri)
+	return send("playuri " .. tostring(uri))
+end
+
+function queue_uri(uri)
+	return send("queue " .. tostring(uri))
+end
+
+function request_playlists()
+	return send("playlists")
+end
+
+function subscribe(fn)
+	listeners[#listeners + 1] = fn
+end
+
+-- ===================================================================== game callbacks
+local actions = {
+	toggle   = function() send("toggle") end,
+	next     = function() send("next") end,
+	prev     = function() send("prev") end,
+	vol_up   = function() send("volrel " .. VOLUME_STEP) end,
+	vol_down = function() send("volrel -" .. VOLUME_STEP) end,
+	show     = function()
+		announce_next_state = true
+		if not send("state") then announce_next_state = false end
+	end,
+}
+
+local function on_key_press(key)
+	local action = key_to_action[key]
+	if action then actions[action]() end
+end
+
+local function actor_on_update()
+	local now = time_global()
+	if now < next_pump_at then return end
+	next_pump_at = now + PUMP_MS
+
+	ensure_link()
+	if link_mode == "socket" then
+		sock_pump(now)
+	else
+		file_pump(now)
+	end
+end
+
+local function actor_on_net_destroy()
+	if sock then
+		pcall(function() sock:close() end)
+		sock = nil
+	end
+end
+
+function on_game_start()
+	for action, key_name in pairs(KEYS) do
+		local code = DIK_keys and DIK_keys[key_name]
+		if code then key_to_action[code] = action end
+	end
+	RegisterScriptCallback("on_key_press", on_key_press)
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_net_destroy", actor_on_net_destroy)
+end

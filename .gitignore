@@ -1,0 +1,12 @@
+# personal: your Spotify client id, login tokens and librespot credentials
+config.json
+tokens.json
+librespot-cache/
+# binaries: these go into the release zip, not into git (see docs/BUILDING.md)
+daemon/librespot/librespot.exe
+dist/
+# build output
+bin/
+obj/
+*.log
+test_audio.raw

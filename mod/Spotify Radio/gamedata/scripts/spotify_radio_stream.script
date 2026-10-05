@@ -1,0 +1,394 @@
+--[[
+	Spotify Radio - plays Spotify through the game engine.
+
+	The daemon cuts Spotify's audio into one-second OGG chunks, writes each into the current
+	level folder and announces it ("chunk <name> <ms> <index>"). This script:
+	  1. rescans "$level$" (small, non-recursive, about 1 ms) so the engine sees the file;
+	  2. file_renames it into gamedata\sounds\spotify_radio\ (sounds cannot load from "$level$");
+	  3. chains it onto the playing sound with attach_tail, so the chunks play as one sound.
+
+	Engine behaviour this is built around (docs/HOW-IT-WORKS.md has the details):
+	  - at most two tails can be queued; a third attach_tail is ignored and length() does not grow;
+	  - the engine reads up to 2.4 s ahead, in steps of up to 0.8 s;
+	  - attaching to a sound that has been read to its end freezes the game;
+	  - a sound the engine stops rendering and later resumes (pause, culling) plays wrong audio.
+
+	"ub" is an upper bound on the engine's read position: 2.4 s when a sound starts, reset by
+	every refused attach, growing with time in between. A chunk is attached only while ub is
+	short of the end; otherwise the sound runs out and a new one starts. The sound is stopped on
+	pause and when inaudible, so the engine never resumes it.
+
+	Only FS calls that return nothing or plain values are used: append_path and get_path break
+	the game even inside pcall.
+
+	Progress is logged to the daemon ("log ..." lines in appdata\spotify_radio_cmd.txt).
+
+	The stream is asked for as soon as the daemon answers, and again after every level change
+	(scripts restart then). There is no switch in the UI; set IN_GAME_AUDIO to false to keep the
+	PDA a remote control for the Spotify app. Without librespot the daemon says "unavailable"
+	and that is what happens anyway.
+
+	Modes: "head" = 2D stereo. "world" = positional, DISABLED by WORLD_ENABLED because doppler
+	bends the pitch when the player moves. Fix that before enabling it.
+]]
+
+local IN_GAME_AUDIO = true                  -- false: music stays in the Spotify app
+local WORLD_ENABLED = false                 -- positional mode, unfinished: see the header
+
+local ALIAS    = "$level$"                  -- where the daemon drops chunks
+local DIR      = "spotify_radio"            -- folder under gamedata\sounds the chunks are moved to
+local MIN_DIST = 2
+local MAX_DIST = 45
+local BACK_DIST = 42                        -- after walking out of earshot, start again inside this distance
+local ENGINE_MAX_DIST = 1000                -- engine range for the world sound, so the engine never distance-culls it
+local CULL_GAIN = 0.01                      -- the engine stops rendering a sound quieter than this (snd_cull)
+local AMBIENT = snd_type and snd_type.world_ambient or 134217856   -- sound type the engine does not occlude
+local MAX_QUEUE = 7                         -- more chunks than this waiting means we fell behind: skip to the newest
+local SETTLE_MS = 500                       -- after a pause, wait this long for the backlog before starting again
+local DAEMON_GAVE_UP_MS = 15000             -- paused longer than this: ask for the stream again (the daemon stops writing after 30 s)
+local STALL_MS = 250                        -- game time this far behind real time in one update = the game was paused
+local FIRST_READ_MS = 2400                  -- the engine reads up to this much the moment a sound starts
+local JUMP_MS = 800                         -- and then moves its read position in jumps of up to this
+local SAFETY_MS = 300                       -- keep the read position at least this far from the end of the data
+local RATE = { head = 1.005, world = 1.15 }  -- fastest the engine may consume audio, relative to game time
+local KEEP_MS  = 1000                       -- delete a chunk file this long after the engine is done with it
+local PREBUFFER = 5                         -- chunks to have in hand before a sound is started (three go to the engine)
+local WAITING = 2                           -- chunks normally waiting here while a sound plays
+local REPORT_EVERY = 30                     -- report one chained chunk in this many
+
+local mode = IN_GAME_AUDIO and "head" or "off"
+local requested = false                     -- the stream has been asked for on this link
+local failed = false                        -- the daemon could not start it
+local starting = false                      -- asked, not confirmed yet: chunks announced before that are from an older stream
+local pos                                   -- world position of the "radio"
+local queue = {}                            -- chunks moved into place, waiting to be started or attached
+local cur                                   -- the playing sound: { snd, t0, hop, count, files, lens, ub, ub_at } (count = chunks the engine took)
+local used = {}                             -- files handed to the engine: { path, done_at } (done_at nil while in use)
+local hold                                  -- why nothing may play right now (out of earshot / muted), or nil
+local last_now, last_real                   -- game and real time of the previous update
+local settle_until = 0                      -- no new sound before this (game time)
+
+local function report(msg)
+	printf("[spotify_radio_stream] %s", msg)
+	spotify_radio.tell("log " .. msg)
+end
+
+-- Remove chunks left in gamedata\sounds\spotify_radio by an earlier session.
+local function delete_leftovers()
+	local fs = getFS()
+	local list = fs:file_list_open("$game_sounds$", DIR .. "\\", bit_or(FS.FS_ListFiles, FS.FS_RootOnly))
+	local count = list and list:Size() or 0
+	for i = 0, count - 1 do
+		fs:file_delete(fs:update_path("$game_sounds$", DIR .. "\\" .. list:GetAt(i)))
+	end
+	if count > 0 then report("removed " .. count .. " old chunk files") end
+end
+
+local function drop_file(path)
+	getFS():file_delete(path)                -- removes the file and its index entry; quietly does nothing if it is gone
+end
+
+-- Stops the playing sound; its files are removed a little later by the update loop.
+local function stop_sound()
+	if not cur then return end
+	pcall(function() cur.snd:stop() end)
+	local at = time_global() + KEEP_MS
+	for i = 1, #cur.files do cur.files[i].done_at = at end
+	cur = nil
+end
+
+local function stop_all()
+	stop_sound()
+	for i = 1, #queue do drop_file(queue[i].path) end
+	queue = {}
+	hold = nil
+end
+
+-- Real time in ms; unlike time_global it keeps running while the game is paused.
+local function real_ms()
+	return os.clock() * 1000
+end
+
+local function effects_volume()
+	local ok, v = pcall(function() return get_console():get_float("snd_volume_eff") end)
+	return ok and tonumber(v) or 1
+end
+
+-- World mode: how loud the radio is at distance d, as the sound's volume (1 at MIN_DIST, falling
+-- to 0 at MAX_DIST), kept just high enough that the engine does not cull the sound.
+local function world_volume(d, eff)
+	local v = (MAX_DIST - d) / (MAX_DIST - MIN_DIST)
+	local floor = eff > 0 and 2.5 * CULL_GAIN / eff or 1
+	return math.min(1, math.max(v, floor))
+end
+
+-- Hands a chunk file to the playing sound's bookkeeping. The engine holds the file being read
+-- and two tails, so once chunk n is accepted, chunk n-3 and older are finished with.
+local function track_file(c, path, now)
+	local f = { path = path }
+	used[#used + 1] = f
+	c.files[#c.files + 1] = f
+	local old = c.files[#c.files - 3]
+	if old and not old.done_at then old.done_at = now + KEEP_MS end
+end
+
+local function on_chunk(name, hop, index)
+	if mode == "off" or starting then return end
+	local fs = getFS()
+	local file = name .. ".ogg"
+	local rel = DIR .. "\\" .. name
+
+	local c0 = os.clock()
+	fs:rescan_path(ALIAS)
+	fs:rescan_pathes()
+	if not fs:exist(ALIAS, file) then
+		report(string.format("chunk %d NOT visible after rescan (%.1f ms)", index, (os.clock() - c0) * 1000))
+		return
+	end
+
+	-- Move it under gamedata\sounds; the engine renames the file and its index entry together.
+	local dst = fs:update_path("$game_sounds$", rel .. ".ogg")
+	fs:file_rename(fs:update_path(ALIAS, file), dst, true)
+	local prep_ms = (os.clock() - c0) * 1000
+
+	-- Never hand the engine a sound it cannot open: a missing file crashes or plays silence.
+	local f = io.open(dst, "rb")
+	if f then f:close() end
+	if not f or not fs:exist("$game_sounds$", rel .. ".ogg") then
+		report(string.format("chunk %d could not be moved to %s (on disk: %s)", index, dst, tostring(f ~= nil)))
+		return
+	end
+	queue[#queue + 1] = { rel = rel, path = dst, index = index, hop = hop, prep_ms = prep_ms }
+end
+
+-- Starts a new sound from the front of the queue: the first chunk plus up to two tails.
+local function start_sound(now)
+	local c = table.remove(queue, 1)
+	local snd
+	if mode == "world" then
+		local ok, s = pcall(sound_object, c.rel, AMBIENT)
+		if ok then snd = s end
+	end
+	snd = snd or sound_object(c.rel)
+	local len = snd:length()
+	if not len or len < c.hop / 2 then
+		-- far too short: the engine loaded its silent placeholder instead of our file
+		report(string.format("chunk %d did not load as audio (length %s ms)", c.index, tostring(len)))
+		drop_file(c.path)
+		return
+	end
+	local s = { snd = snd, t0 = now, hop = c.hop, count = 1, files = {}, lens = { len }, ub = FIRST_READ_MS, ub_at = now }
+	track_file(s, c.path, now)
+	while s.count < 3 and queue[1] do
+		local t = table.remove(queue, 1)
+		local before = snd:length()
+		snd:attach_tail(t.rel)
+		s.count = s.count + 1
+		s.lens[s.count] = snd:length() - before
+		track_file(s, t.path, now)
+	end
+	if mode == "head" then
+		snd:play(db.actor, 0, sound_object.s2d)
+		snd.min_distance = 1000              -- top priority: the engine must never take this sound's channel
+	else
+		-- no owner object: NPCs must not "hear" the radio as a noise made by the player
+		if not pcall(snd.play_at_pos, snd, nil, pos, 0, sound_object.s3d) then
+			snd:play_at_pos(db.actor, pos, 0, sound_object.s3d)
+		end
+		snd.min_distance = MIN_DIST
+		snd.max_distance = ENGINE_MAX_DIST
+		snd.volume = world_volume(db.actor:position():distance_to(pos), effects_volume())
+	end
+	cur = s
+	report(string.format("chunk %d: started a new sound with %d chunk(s) (prep %.1f ms, length %d ms)",
+		c.index, s.count, c.prep_ms, snd:length()))
+end
+
+local function request_stream()
+	local dir = getFS():update_path(ALIAS, "")
+	report("stream: " .. mode .. " in " .. dir)
+	starting = true
+	spotify_radio.tell("stream start " .. mode .. " " .. dir)
+end
+
+local function actor_on_update()
+	local now = time_global()
+
+	-- delete chunk files the engine is done with
+	for i = #used, 1, -1 do
+		if used[i].done_at and now >= used[i].done_at then
+			drop_file(used[i].path)
+			table.remove(used, i)
+		end
+	end
+	if mode == "off" then return end
+
+	-- ask for the stream once the daemon answers; start over if it went away
+	if not spotify_radio.is_connected() then
+		if requested then
+			requested = false
+			stop_all()
+		end
+	elseif not requested then
+		requested = true
+		request_stream()
+	end
+
+	-- the sound ran out: normal when Spotify is paused, otherwise chunks came too late
+	if cur and now - cur.t0 > 500 and not cur.snd:playing() then
+		report(string.format("sound ended after %d chunks (%d ms)", cur.count, now - cur.t0))
+		stop_sound()
+	end
+
+	-- The game was paused since the last update: the engine must not resume this sound.
+	local real = real_ms()
+	local stalled = last_real and (real - last_real) - (now - last_now) or 0
+	last_now, last_real = now, real
+	if stalled > STALL_MS then
+		if stalled > DAEMON_GAVE_UP_MS then
+			-- The daemon stops streaming when it has not heard from the game for a while (and
+			-- cleans up the chunk files), so ask for the stream again from scratch.
+			report(string.format("game was paused for %d s, asking for the stream again", math.floor(stalled / 1000)))
+			stop_all()
+			request_stream()
+		elseif cur then
+			report(string.format("game was paused for %d ms, restarting the sound", stalled))
+			stop_sound()
+		end
+		settle_until = now + SETTLE_MS       -- let the chunks announced meanwhile come in first
+	end
+
+	-- Inaudible: stop the sound ourselves rather than let the engine cull it.
+	local eff = effects_volume()
+	local d = mode == "world" and db.actor:position():distance_to(pos) or 0
+	local why
+	if eff < 2 * CULL_GAIN then why = "effects volume is off"
+	elseif d > MAX_DIST then why = "out of earshot"
+	elseif hold == "out of earshot" and d > BACK_DIST then why = hold end
+	if why ~= hold then
+		hold = why
+		report(why and (why .. ", sound stopped") or "audible again")
+		if why then stop_sound() end
+	end
+	if cur and mode == "world" then cur.snd.volume = world_volume(d, eff) end
+
+	-- Fell behind (after a pause, or while nothing may play): keep only the newest chunks.
+	if #queue > (hold and PREBUFFER or MAX_QUEUE) then
+		if not hold then report(string.format("%d chunks waiting, skipping to the newest", #queue)) end
+		local keep = (cur and not cur.closed) and WAITING or PREBUFFER
+		while #queue > keep do drop_file(table.remove(queue, 1).path) end
+	end
+	if hold then return end
+
+	if not cur then
+		if #queue >= PREBUFFER and now >= settle_until then
+			-- always start from the newest audio
+			while #queue > PREBUFFER do drop_file(table.remove(queue, 1).path) end
+			start_sound(now)
+		end
+		return
+	end
+
+	while queue[1] and not cur.closed do
+		local total = cur.snd:length()                     -- ms of audio given to this sound
+		local ub = cur.ub + (now - cur.ub_at) * RATE[mode] -- the engine has read no further than this
+		if ub > total - SAFETY_MS then
+			-- It may have read to the end; chaining now could freeze the game.
+			-- Let this sound run out; the queued chunks start a new one.
+			cur.closed = true
+			report(string.format("chunk %d came too late to chain (%d ms into %d), letting the sound end", queue[1].index, math.floor(ub), total))
+			break
+		end
+		local c = queue[1]
+		cur.snd:attach_tail(c.rel)
+		local grown = cur.snd:length() - total
+		if grown <= 0 then
+			-- Refused: two tails are queued, so the engine is still reading the file before them.
+			local n = #cur.lens
+			cur.ub = math.min(ub, total - cur.lens[n] - cur.lens[n - 1] + JUMP_MS)
+			cur.ub_at = now
+			break
+		end
+		table.remove(queue, 1)
+		cur.count = cur.count + 1
+		cur.lens[cur.count] = grown
+		track_file(cur, c.path, now)
+		if c.index % REPORT_EVERY == 0 then
+			report(string.format("chunk %d: chained (prep %.1f ms, read at most %d of %d ms, %d chunks waiting)",
+				c.index, c.prep_ms, math.floor(ub), cur.snd:length(), #queue))
+		end
+	end
+end
+
+local function on_event(event, f)
+	if event ~= "line" then return end
+	if f[1] == "chunk" then
+		local ok, err = pcall(on_chunk, f[2] or "", tonumber(f[3]) or 1000, tonumber(f[4]) or 0)
+		if not ok then report("chunk error: " .. tostring(err)) end
+	elseif f[1] == "stream" and f[2] == "started" then
+		starting = false
+	elseif f[1] == "stream" and f[2] == "failed" then
+		-- The daemon could not start the stream (its reason arrives as a normal error message).
+		-- It is asked again when the PDA tab is opened or the daemon reconnects.
+		stop_all()
+		failed = true
+	elseif f[1] == "stream" and f[2] == "unavailable" then
+		report("the daemon has no librespot: music stays in the Spotify app")
+		stop_all()
+		mode = "off"
+	end
+end
+
+-- Called when the PDA tab opens: try again if the last request failed.
+function retry()
+	if failed then
+		failed = false
+		requested = false
+	end
+end
+
+-- Switches mode: "off", "head" or (if enabled) "world". Not used by the UI.
+function set_mode(new)
+	if new == mode or (new == "world" and not WORLD_ENABLED) then return mode end
+	stop_all()
+	failed = false
+	mode = new
+	if mode == "off" then
+		if requested then spotify_radio.tell("stream stop") end
+		requested = false
+	else
+		local p = db.actor:position()
+		pos = vector():set(p.x, p.y + 1.2, p.z)
+		requested = spotify_radio.is_connected()
+		if requested then request_stream() end
+	end
+	return mode
+end
+
+-- World mode: moves the radio to the player. Called when something is started from the PDA.
+function place_here()
+	if mode ~= "world" or not db.actor then return end
+	local p = db.actor:position()
+	pos = vector():set(p.x, p.y + 1.2, p.z)
+	if cur then cur.snd:set_position(pos) end
+	report(string.format("radio placed at %d, %d, %d", math.floor(p.x), math.floor(p.y), math.floor(p.z)))
+end
+
+function get_mode()
+	return mode
+end
+
+local function actor_on_first_update()
+	local ok, err = pcall(delete_leftovers)
+	if not ok then report("cleanup failed: " .. tostring(err)) end
+end
+
+function on_game_start()
+	spotify_radio.subscribe(on_event)
+	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+	RegisterScriptCallback("actor_on_update", actor_on_update)
+	RegisterScriptCallback("actor_on_net_destroy", stop_all)
+	-- the main menu pauses the game: stop the sound before the engine tries to resume it
+	RegisterScriptCallback("main_menu_on_init", stop_sound)
+	RegisterScriptCallback("main_menu_on_quit", stop_sound)
+end
