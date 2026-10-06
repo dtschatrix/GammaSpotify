@@ -80,9 +80,9 @@ The daemon sends `track <chunk> <ms> <duration> <uri> <artist> <title>`: from th
 
 ## When the stream runs
 
-The script asks for the stream (`stream start head <level folder>`) as soon as the daemon answers. Scripts restart on every level change, so it is asked for again then; chunks announced before the daemon confirms are ignored. The daemon moves Spotify playback to its librespot device without changing play / pause.
+The script asks for the stream (`stream start head <level folder>`) three seconds after the level has loaded, once the daemon answers. Scripts restart on every level change, so it is asked for again then; chunks announced before the daemon confirms are ignored. The daemon moves Spotify playback to its librespot device without changing play / pause.
 
-Scripts do not run while the game is paused, in the main menu or loading. When the game has said nothing for `awaySeconds` the daemon pauses Spotify, and resumes it at the game's next message. The game keeps its queue meanwhile, so nothing is lost. If audio flows for ten seconds while the game is away (someone pressed play elsewhere), the daemon stops the stream and sends `stream ended` when the game is back, and the game asks again.
+Scripts do not run while the game is paused, in the main menu or loading. When the game has said nothing for `awaySeconds` the daemon pauses Spotify, and resumes it at the game's next buffer report or `stream start`. The game keeps its queue meanwhile, so nothing is lost. If audio flows for ten seconds while the game is away (someone pressed play elsewhere), the daemon stops the stream and sends `stream ended` when the game is back, and the game asks again.
 
 Without `librespot.exe` the daemon answers `stream unavailable` and the mod is a remote control for the Spotify app.
 

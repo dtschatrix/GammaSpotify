@@ -48,6 +48,7 @@ public sealed class GameAudio
     private DateTime _lastStateUtc;
     private int _gameBufMs = -1;       // audio the game says it holds, until used
     private volatile bool _gameHolds;
+    private volatile bool _reported;   // a buffer report came since the game went away
     private volatile int _gameLastIndex;
     private volatile bool _away;       // the game stopped talking
     private DateTime _awaySinceUtc;
@@ -302,6 +303,7 @@ public sealed class GameAudio
     {
         _gameHolds = holds;
         _gameLastIndex = lastIndex;
+        _reported = true;
         Interlocked.Exchange(ref _gameBufMs, Math.Max(0, ms));
     }
 
@@ -329,6 +331,7 @@ public sealed class GameAudio
                 if (quiet && !_away)
                 {
                     _awaySinceUtc = DateTime.UtcNow;
+                    _reported = false;
                     _away = true;
                     if ((await _spotify.GetStateAsync(ct)).Status == "playing")
                     {
@@ -337,8 +340,10 @@ public sealed class GameAudio
                         await _spotify.PauseAsync(ct);
                     }
                 }
-                else if (!quiet && _away)
+                else if (!quiet && _away && _reported)
                 {
+                    // Only a buffer report counts: after a level change the new scripts say
+                    // hello first and ask for the stream a few seconds later, which resumes it.
                     _away = false;
                     if (Interlocked.Exchange(ref _awayPaused, 0) == 1)
                     {

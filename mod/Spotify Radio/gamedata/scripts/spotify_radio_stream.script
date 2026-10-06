@@ -37,8 +37,8 @@
 	What is heard is seconds behind Spotify, so the daemon also says which track and position
 	each chunk is ("track <chunk> <ms> ..."), and heard() gives that for the chunk being played.
 
-	The stream is asked for as soon as the daemon answers, and again after every level change
-	(scripts restart then). There is no switch in the UI; set IN_GAME_AUDIO to false to keep the
+	The stream is asked for a few seconds after a level has loaded, once the daemon answers
+	(scripts restart on every level change). There is no switch in the UI; set IN_GAME_AUDIO to false to keep the
 	PDA a remote control for the Spotify app. Without librespot the daemon says "unavailable"
 	and that is what happens anyway.
 
@@ -70,6 +70,7 @@ local CHANGE_MS = 6000                      -- after a track change from the PDA
 local PREBUFFER = 5                         -- chunks to have in hand before a sound is started (three go to the engine)
 local WAITING = 2                           -- chunks normally waiting here while a sound plays
 local REPORT_EVERY = 30                     -- report one chained chunk in this many
+local START_DELAY_MS = 3000                 -- after a level has loaded, wait this long before asking for the stream
 local BUF_MS = 1000                         -- how often the daemon is told how much audio is held here
 local MAX_MARKS = 8
 
@@ -89,6 +90,7 @@ local ignore_until = 0                      -- a track change was asked for: chu
 local game_vol = 100                        -- volume of the sound itself, 0..100 (the PDA's volume buttons)
 local marks = {}                            -- { index, pos, duration, uri, artist, title }: from chunk index on it is this track
 local next_buf_at = 0
+local ready_at                              -- game time from which the stream may be asked for
 local last_index = -1                       -- index of the newest chunk the daemon announced
 local hold                                  -- why nothing may play right now (out of earshot / muted), or nil
 local last_now, last_real                   -- game and real time of the previous update
@@ -270,6 +272,8 @@ local function actor_on_update()
 		end
 	end
 	if mode == "off" then return end
+	-- The first seconds on a level are busy (long frames, the level's own sounds starting).
+	ready_at = ready_at or now + START_DELAY_MS
 
 	-- Let go of chunks the engine and the ear are both done with. The engine holds the file it
 	-- reads and two tails, so the last three are never let go.
@@ -287,7 +291,7 @@ local function actor_on_update()
 			requested = false
 			stop_all()
 		end
-	elseif not requested then
+	elseif not requested and now >= ready_at then
 		requested = true
 		request_stream()
 	end

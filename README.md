@@ -52,7 +52,7 @@ In Spotify the game appears as a device named "STALKER PDA". Playback moves to i
 - The game holds about six seconds of audio, so it is that far behind Spotify. The PDA shows the track and time you hear; the Spotify app is ahead. A pause or skip made in the Spotify app takes up to a second to reach the game.
 - Stereo only. Positional playback is in the code but disabled, because the engine's doppler bends the pitch when you move.
 - Volume also follows the game's SFX slider.
-- The music pauses with the game: in the main menu, while paused, while loading, and when you quit. It continues where it stopped, except after a loading screen, where a few seconds are skipped.
+- The music pauses with the game: in the main menu, while paused, while loading, and when you quit. It continues where it stopped, except after a loading screen: there it starts three seconds after the level has loaded, a few seconds further into the track.
 - The game's own Radio tab is replaced.
 - Titles are transliterated to Latin letters by default (see `encoding`).
 - Search returns at most 10 results per type, which is Spotify's limit.
