@@ -48,15 +48,40 @@ In Spotify the game appears as a device named "STALKER PDA". Playback moves to i
 
 ## Limitations
 
-- A new track is heard a second or two after you pick it. Pause, play and volume act at once.
+Struck through means fixed; what it does now follows.
+
+- ~~The game is about five seconds behind Spotify. Skips, pauses and track changes are heard five seconds late.~~ A new track is heard a second or two after you pick it. Pause, play and volume act at once.
+- ~~The sound stops in the main menu and while paused, and resumes a few seconds after you return.~~ The music pauses with the game (main menu, pause, quitting) and continues where it stopped.
+- ~~During loading screens Spotify keeps playing unheard.~~ Spotify is paused while a level loads. The music starts three seconds after the level has loaded, a few seconds further into the track.
 - The game holds about six seconds of audio, so it is that far behind Spotify. The PDA shows the track and time you hear; the Spotify app is ahead. A pause or skip made in the Spotify app takes up to a second to reach the game.
 - Stereo only. Positional playback is in the code but disabled, because the engine's doppler bends the pitch when you move.
 - Volume also follows the game's SFX slider.
-- The music pauses with the game: in the main menu, while paused, while loading, and when you quit. It continues where it stopped, except after a loading screen: there it starts three seconds after the level has loaded, a few seconds further into the track.
 - The game's own Radio tab is replaced.
 - Titles are transliterated to Latin letters by default (see `encoding`).
 - Search returns at most 10 results per type, which is Spotify's limit.
 - No podcasts or local files.
+
+## To do
+
+Planned:
+
+- Redesign the PDA screen.
+- More controls.
+- Seeking within a track.
+- Scrolling lists instead of pages; opening a playlist to see its tracks.
+- A queue you can see and edit.
+- "Start radio from this song".
+
+Ideas, not decided:
+
+- Positional playback: a radio standing in the world, once doppler is dealt with.
+- Repeat modes; saving the current track to your library.
+- Choosing the Spotify device from the PDA.
+- Settings in MCM instead of editing files.
+- Starting the daemon with the game.
+- Non-Latin titles by default.
+- A shorter delay on track changes.
+- Testing on plain Anomaly.
 
 ## Settings
 
