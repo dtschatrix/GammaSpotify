@@ -69,7 +69,7 @@ try
         _ => $"Spotify: {state.Status} on \"{state.Device}\": {state.Artist} - {state.Title}",
     });
     var server = new GameServer(cfg, spotify, new TextCodec(cfg.Encoding));
-    var audio = new GameAudio(cfg, spotify, server.BroadcastAsync, () => server.GameIsThere);
+    var audio = new GameAudio(cfg, spotify, server.BroadcastAsync, () => server.GameQuiet);
     server.Audio = audio;
     AppDomain.CurrentDomain.ProcessExit += (_, _) => audio.Kill(); // never leave librespot running on its own
     var audioTask = Task.Run(() => audio.RunAsync(cts.Token));

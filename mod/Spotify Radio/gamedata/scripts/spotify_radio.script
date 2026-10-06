@@ -47,6 +47,13 @@ state = {
 	volume = -1, device = "", shuffle = false,
 	received_at = 0,             -- time_global() of the last update
 }
+-- What the PDA shows: the same as state, except that when the music runs through the game
+-- the track and position are those of the audio being heard, which is seconds behind Spotify.
+shown = { status = "offline", artist = "", title = "", progress = 0, duration = 0, volume = -1,
+          device = "", shuffle = false, uri = "", received_at = 0, heard = false }
+heard = function() return nil end -- replaced by spotify_radio_stream: track and position being heard
+local status_until = 0           -- a button was pressed: shown.status is ahead of Spotify until then
+
 results = {}                     -- last search / playlist listing: { {kind=, uri=, title=, subtitle=}, ... }
 results_title = ""
 results_version = 0              -- bumped whenever results change
@@ -108,12 +115,40 @@ local function split_tabs(line)
 end
 
 function now_playing_text()
-	if state.status == "offline" then return "Spotify: daemon not connected" end
-	if state.status == "nodevice" then return "Spotify: nothing active - open the Spotify app" end
-	if state.title == "" then return "Spotify: nothing playing" end
-	local name = state.artist ~= "" and (state.artist .. " - " .. state.title) or state.title
-	if state.status == "paused" then return "Spotify (paused): " .. name end
+	if shown.status == "offline" then return "Spotify: daemon not connected" end
+	if shown.status == "nodevice" then return "Spotify: nothing active - open the Spotify app" end
+	if shown.title == "" then return "Spotify: nothing playing" end
+	local name = shown.artist ~= "" and (shown.artist .. " - " .. shown.title) or shown.title
+	if shown.status == "paused" then return "Spotify (paused): " .. name end
 	return "Spotify: " .. name
+end
+
+-- Position in the track, in ms.
+function shown_position()
+	local pos = shown.progress
+	if not shown.heard and shown.status == "playing" then pos = pos + (time_global() - shown.received_at) end
+	return math.max(0, math.min(shown.duration, pos))
+end
+
+-- Brings "shown" up to date. True when another track is now playing.
+local function show_track()
+	local old = shown.uri
+	local m, pos = heard()
+	if m then
+		shown.artist, shown.title, shown.uri, shown.duration = m.artist, m.title, m.uri, m.duration
+		shown.progress, shown.received_at, shown.heard = pos, time_global(), true
+	else
+		shown.artist, shown.title, shown.uri, shown.duration = state.artist, state.title, state.uri, state.duration
+		shown.progress, shown.received_at, shown.heard = state.progress, state.received_at, false
+	end
+	return shown.uri ~= old and shown.uri ~= "" and shown.status == "playing"
+end
+
+-- A button was pressed in the PDA: show the result without waiting for Spotify.
+function expect_status(status)
+	if shown.status ~= "playing" and shown.status ~= "paused" then return end
+	shown.status = status
+	status_until = time_global() + 2000
 end
 
 local function go_offline(reason)
@@ -121,12 +156,13 @@ local function go_offline(reason)
 	rx = ""
 	pending_results = nil
 	state.status = "offline"
+	shown.status = "offline"
 	notify("state", state)
 end
 
 -- ===================================================================== protocol
 local function on_state(f)
-	local old_uri, old_status = state.uri, state.status
+	local old_status = state.status
 	state.status   = f[2] or "idle"
 	state.artist   = f[3] or ""
 	state.title    = f[4] or ""
@@ -138,7 +174,11 @@ local function on_state(f)
 	state.uri      = f[10] or ""
 	state.received_at = time_global()
 
-	local track_changed = state.uri ~= old_uri and state.uri ~= "" and state.status == "playing"
+	shown.volume, shown.device, shown.shuffle = state.volume, state.device, state.shuffle
+	if time_global() >= status_until or shown.status == state.status then
+		shown.status, status_until = state.status, 0
+	end
+	local track_changed = show_track()
 	local resumed = old_status ~= "playing" and state.status == "playing" and old_status ~= "offline"
 	if announce_next_state or track_changed or resumed then
 		announce_next_state = false
@@ -414,6 +454,7 @@ local function actor_on_update()
 	else
 		file_pump(now)
 	end
+	if show_track() then show(now_playing_text()) end
 end
 
 local function actor_on_net_destroy()

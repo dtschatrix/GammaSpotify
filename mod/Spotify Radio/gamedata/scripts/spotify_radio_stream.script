@@ -23,6 +23,20 @@
 
 	Progress is logged to the daemon ("log ..." lines in appdata\spotify_radio_cmd.txt).
 
+	The daemon reads Spotify ahead of real time until this script holds about six seconds, so
+	the five chunks a sound needs arrive within a moment of a start or a track change. Once a
+	second the daemon is told how much is held here ("buf <ms> <newest chunk>").
+	  - Pause: the sound is stopped at once and the chunks not heard yet are kept; play starts
+	    from them again. The same when the game is paused or in the main menu (the daemon
+	    pauses Spotify when it stops hearing from the game).
+	  - Track change: everything held is dropped at once; the daemon starts a new buffer.
+	  - Volume: the PDA buttons set the sound's own volume here, so they act at once.
+	The PDA tells this script what the player pressed (user()); the daemon reports pauses and
+	changes made elsewhere ("audio hold", "audio resume", "audio flush").
+
+	What is heard is seconds behind Spotify, so the daemon also says which track and position
+	each chunk is ("track <chunk> <ms> ..."), and heard() gives that for the chunk being played.
+
 	The stream is asked for as soon as the daemon answers, and again after every level change
 	(scripts restart then). There is no switch in the UI; set IN_GAME_AUDIO to false to keep the
 	PDA a remote control for the Spotify app. Without librespot the daemon says "unavailable"
@@ -43,18 +57,21 @@ local BACK_DIST = 42                        -- after walking out of earshot, sta
 local ENGINE_MAX_DIST = 1000                -- engine range for the world sound, so the engine never distance-culls it
 local CULL_GAIN = 0.01                      -- the engine stops rendering a sound quieter than this (snd_cull)
 local AMBIENT = snd_type and snd_type.world_ambient or 134217856   -- sound type the engine does not occlude
-local MAX_QUEUE = 7                         -- more chunks than this waiting means we fell behind: skip to the newest
+local MAX_QUEUE = 20                        -- more chunks than this waiting means we fell behind: skip to the newest
 local SETTLE_MS = 500                       -- after a pause, wait this long for the backlog before starting again
-local DAEMON_GAVE_UP_MS = 15000             -- paused longer than this: ask for the stream again (the daemon stops writing after 30 s)
 local STALL_MS = 250                        -- game time this far behind real time in one update = the game was paused
 local FIRST_READ_MS = 2400                  -- the engine reads up to this much the moment a sound starts
 local JUMP_MS = 800                         -- and then moves its read position in jumps of up to this
 local SAFETY_MS = 300                       -- keep the read position at least this far from the end of the data
 local RATE = { head = 1.005, world = 1.15 }  -- fastest the engine may consume audio, relative to game time
-local KEEP_MS  = 1000                       -- delete a chunk file this long after the engine is done with it
+local KEEP_MS  = 1000                       -- delete a chunk file this long after it was let go
+local RETIRE_MS = 1500                      -- let a chunk go this long after it was heard to its end
+local CHANGE_MS = 6000                      -- after a track change from the PDA, ignore chunks this long or until the daemon starts over
 local PREBUFFER = 5                         -- chunks to have in hand before a sound is started (three go to the engine)
 local WAITING = 2                           -- chunks normally waiting here while a sound plays
 local REPORT_EVERY = 30                     -- report one chained chunk in this many
+local BUF_MS = 1000                         -- how often the daemon is told how much audio is held here
+local MAX_MARKS = 8
 
 local mode = IN_GAME_AUDIO and "head" or "off"
 local requested = false                     -- the stream has been asked for on this link
@@ -62,8 +79,17 @@ local failed = false                        -- the daemon could not start it
 local starting = false                      -- asked, not confirmed yet: chunks announced before that are from an older stream
 local pos                                   -- world position of the "radio"
 local queue = {}                            -- chunks moved into place, waiting to be started or attached
-local cur                                   -- the playing sound: { snd, t0, hop, count, files, lens, ub, ub_at } (count = chunks the engine took)
-local used = {}                             -- files handed to the engine: { path, done_at } (done_at nil while in use)
+local cur                                   -- the playing sound: { snd, t0, count, items, lens, ends, first, ub, ub_at }
+                                            --   items = chunks the engine took, in order; ends = where each ends in the sound (ms);
+                                            --   first = oldest item whose file is still kept
+local trash = {}                            -- chunk files to delete: { path, at }
+local paused = false                        -- Spotify is paused: chunks are kept, nothing plays
+local paused_at = 0
+local ignore_until = 0                      -- a track change was asked for: chunks before this time belong to the old track
+local game_vol = 100                        -- volume of the sound itself, 0..100 (the PDA's volume buttons)
+local marks = {}                            -- { index, pos, duration, uri, artist, title }: from chunk index on it is this track
+local next_buf_at = 0
+local last_index = -1                       -- index of the newest chunk the daemon announced
 local hold                                  -- why nothing may play right now (out of earshot / muted), or nil
 local last_now, last_real                   -- game and real time of the previous update
 local settle_until = 0                      -- no new sound before this (game time)
@@ -88,12 +114,37 @@ local function drop_file(path)
 	getFS():file_delete(path)                -- removes the file and its index entry; quietly does nothing if it is gone
 end
 
--- Stops the playing sound; its files are removed a little later by the update loop.
+local function discard(c, at)
+	trash[#trash + 1] = { path = c.path, at = at }
+end
+
+-- Stops the playing sound and lets go of its chunks (files are removed a little later).
 local function stop_sound()
 	if not cur then return end
 	pcall(function() cur.snd:stop() end)
 	local at = time_global() + KEEP_MS
-	for i = 1, #cur.files do cur.files[i].done_at = at end
+	for i = cur.first, cur.count do discard(cur.items[i], at) end
+	cur = nil
+end
+
+-- Stops the playing sound but keeps what has not been heard: those chunks go back to the front
+-- of the queue. A chunk is only replayed from its start, so with round = true the one being
+-- heard is kept or dropped, whichever is closer.
+local function take_back(round)
+	if not cur then return end
+	local heard = time_global() - cur.t0
+	local h = cur.count + 1
+	for i = cur.first, cur.count do
+		if heard < cur.ends[i] then h = i break end
+	end
+	if round and h <= cur.count and heard - (cur.ends[h] - cur.lens[h]) > cur.lens[h] / 2 then h = h + 1 end
+	pcall(function() cur.snd:stop() end)
+	local at = time_global() + KEEP_MS
+	for i = cur.first, h - 1 do discard(cur.items[i], at) end
+	local back = {}
+	for i = h, cur.count do back[#back + 1] = cur.items[i] end
+	for i = 1, #queue do back[#back + 1] = queue[i] end
+	queue = back
 	cur = nil
 end
 
@@ -122,18 +173,9 @@ local function world_volume(d, eff)
 	return math.min(1, math.max(v, floor))
 end
 
--- Hands a chunk file to the playing sound's bookkeeping. The engine holds the file being read
--- and two tails, so once chunk n is accepted, chunk n-3 and older are finished with.
-local function track_file(c, path, now)
-	local f = { path = path }
-	used[#used + 1] = f
-	c.files[#c.files + 1] = f
-	local old = c.files[#c.files - 3]
-	if old and not old.done_at then old.done_at = now + KEEP_MS end
-end
-
 local function on_chunk(name, hop, index)
 	if mode == "off" or starting then return end
+	last_index = index
 	local fs = getFS()
 	local file = name .. ".ogg"
 	local rel = DIR .. "\\" .. name
@@ -158,6 +200,10 @@ local function on_chunk(name, hop, index)
 		report(string.format("chunk %d could not be moved to %s (on disk: %s)", index, dst, tostring(f ~= nil)))
 		return
 	end
+	if time_global() < ignore_until then
+		drop_file(dst)                       -- still the track that was skipped
+		return
+	end
 	queue[#queue + 1] = { rel = rel, path = dst, index = index, hop = hop, prep_ms = prep_ms }
 end
 
@@ -177,19 +223,20 @@ local function start_sound(now)
 		drop_file(c.path)
 		return
 	end
-	local s = { snd = snd, t0 = now, hop = c.hop, count = 1, files = {}, lens = { len }, ub = FIRST_READ_MS, ub_at = now }
-	track_file(s, c.path, now)
+	local s = { snd = snd, t0 = now, count = 1, items = { c }, lens = { len }, ends = { len }, first = 1, ub = FIRST_READ_MS, ub_at = now }
 	while s.count < 3 and queue[1] do
 		local t = table.remove(queue, 1)
 		local before = snd:length()
 		snd:attach_tail(t.rel)
 		s.count = s.count + 1
+		s.items[s.count] = t
 		s.lens[s.count] = snd:length() - before
-		track_file(s, t.path, now)
+		s.ends[s.count] = snd:length()
 	end
 	if mode == "head" then
 		snd:play(db.actor, 0, sound_object.s2d)
 		snd.min_distance = 1000              -- top priority: the engine must never take this sound's channel
+		snd.volume = game_vol / 100
 	else
 		-- no owner object: NPCs must not "hear" the radio as a noise made by the player
 		if not pcall(snd.play_at_pos, snd, nil, pos, 0, sound_object.s3d) then
@@ -197,7 +244,7 @@ local function start_sound(now)
 		end
 		snd.min_distance = MIN_DIST
 		snd.max_distance = ENGINE_MAX_DIST
-		snd.volume = world_volume(db.actor:position():distance_to(pos), effects_volume())
+		snd.volume = world_volume(db.actor:position():distance_to(pos), effects_volume()) * game_vol / 100
 	end
 	cur = s
 	report(string.format("chunk %d: started a new sound with %d chunk(s) (prep %.1f ms, length %d ms)",
@@ -208,20 +255,31 @@ local function request_stream()
 	local dir = getFS():update_path(ALIAS, "")
 	report("stream: " .. mode .. " in " .. dir)
 	starting = true
+	paused = false
 	spotify_radio.tell("stream start " .. mode .. " " .. dir)
 end
 
 local function actor_on_update()
 	local now = time_global()
 
-	-- delete chunk files the engine is done with
-	for i = #used, 1, -1 do
-		if used[i].done_at and now >= used[i].done_at then
-			drop_file(used[i].path)
-			table.remove(used, i)
+	-- delete chunk files that were let go
+	for i = #trash, 1, -1 do
+		if now >= trash[i].at then
+			drop_file(trash[i].path)
+			table.remove(trash, i)
 		end
 	end
 	if mode == "off" then return end
+
+	-- Let go of chunks the engine and the ear are both done with. The engine holds the file it
+	-- reads and two tails, so the last three are never let go.
+	if cur then
+		local heard = now - cur.t0
+		while cur.first <= cur.count - 3 and heard >= cur.ends[cur.first] + RETIRE_MS do
+			discard(cur.items[cur.first], now + KEEP_MS)
+			cur.first = cur.first + 1
+		end
+	end
 
 	-- ask for the stream once the daemon answers; start over if it went away
 	if not spotify_radio.is_connected() then
@@ -232,6 +290,11 @@ local function actor_on_update()
 	elseif not requested then
 		requested = true
 		request_stream()
+	end
+
+	if requested and not failed and now >= next_buf_at then
+		next_buf_at = now + BUF_MS
+		spotify_radio.tell("buf " .. lag_ms() .. " " .. last_index .. (hold and " hold" or ""))
 	end
 
 	-- the sound ran out: normal when Spotify is paused, otherwise chunks came too late
@@ -245,15 +308,9 @@ local function actor_on_update()
 	local stalled = last_real and (real - last_real) - (now - last_now) or 0
 	last_now, last_real = now, real
 	if stalled > STALL_MS then
-		if stalled > DAEMON_GAVE_UP_MS then
-			-- The daemon stops streaming when it has not heard from the game for a while (and
-			-- cleans up the chunk files), so ask for the stream again from scratch.
-			report(string.format("game was paused for %d s, asking for the stream again", math.floor(stalled / 1000)))
-			stop_all()
-			request_stream()
-		elseif cur then
+		if cur then
 			report(string.format("game was paused for %d ms, restarting the sound", stalled))
-			stop_sound()
+			take_back(true)
 		end
 		settle_until = now + SETTLE_MS       -- let the chunks announced meanwhile come in first
 	end
@@ -262,7 +319,7 @@ local function actor_on_update()
 	local eff = effects_volume()
 	local d = mode == "world" and db.actor:position():distance_to(pos) or 0
 	local why
-	if eff < 2 * CULL_GAIN then why = "effects volume is off"
+	if eff * game_vol / 100 < 2 * CULL_GAIN then why = "volume is off"
 	elseif d > MAX_DIST then why = "out of earshot"
 	elseif hold == "out of earshot" and d > BACK_DIST then why = hold end
 	if why ~= hold then
@@ -270,7 +327,9 @@ local function actor_on_update()
 		report(why and (why .. ", sound stopped") or "audible again")
 		if why then stop_sound() end
 	end
-	if cur and mode == "world" then cur.snd.volume = world_volume(d, eff) end
+	if cur then
+		cur.snd.volume = (mode == "world" and world_volume(d, eff) or 1) * game_vol / 100
+	end
 
 	-- Fell behind (after a pause, or while nothing may play): keep only the newest chunks.
 	if #queue > (hold and PREBUFFER or MAX_QUEUE) then
@@ -278,14 +337,10 @@ local function actor_on_update()
 		local keep = (cur and not cur.closed) and WAITING or PREBUFFER
 		while #queue > keep do drop_file(table.remove(queue, 1).path) end
 	end
-	if hold then return end
+	if hold or paused then return end
 
 	if not cur then
-		if #queue >= PREBUFFER and now >= settle_until then
-			-- always start from the newest audio
-			while #queue > PREBUFFER do drop_file(table.remove(queue, 1).path) end
-			start_sound(now)
-		end
+		if #queue >= PREBUFFER and now >= settle_until then start_sound(now) end
 		return
 	end
 
@@ -311,8 +366,9 @@ local function actor_on_update()
 		end
 		table.remove(queue, 1)
 		cur.count = cur.count + 1
+		cur.items[cur.count] = c
 		cur.lens[cur.count] = grown
-		track_file(cur, c.path, now)
+		cur.ends[cur.count] = total + grown
 		if c.index % REPORT_EVERY == 0 then
 			report(string.format("chunk %d: chained (prep %.1f ms, read at most %d of %d ms, %d chunks waiting)",
 				c.index, c.prep_ms, math.floor(ub), cur.snd:length(), #queue))
@@ -320,13 +376,59 @@ local function actor_on_update()
 	end
 end
 
+-- Spotify was paused: stop at once, keep what was not heard.
+local function pause_music()
+	if paused then return end
+	paused, paused_at = true, time_global()
+	take_back(true)
+	report(string.format("paused, keeping %d chunks", #queue))
+end
+
+local function resume_music()
+	if not paused then return end
+	paused = false
+	settle_until = 0
+	report(string.format("resumed with %d chunks", #queue))
+end
+
+-- The track was changed: nothing held is wanted any more.
+local function flush_music()
+	stop_all()
+	paused = false
+	marks = {}
+end
+
 local function on_event(event, f)
+	if event == "state" then
+		-- Paused here but Spotify plays on (the pause did not reach it): follow Spotify.
+		if spotify_radio.state.status == "playing" and paused and time_global() - paused_at > 2500 then resume_music() end
+		return
+	end
 	if event ~= "line" then return end
-	if f[1] == "chunk" then
+	if f[1] == "audio" then
+		if f[2] == "hold" then pause_music()
+		elseif f[2] == "resume" then resume_music()
+		elseif f[2] == "flush" then
+			flush_music()
+			ignore_until = 0
+			report("new track, starting over")
+		end
+	elseif f[1] == "track" then
+		marks[#marks + 1] = { index = tonumber(f[2]) or 0, pos = tonumber(f[3]) or 0, duration = tonumber(f[4]) or 0,
+			uri = f[5] or "", artist = f[6] or "", title = f[7] or "" }
+		if #marks > MAX_MARKS then table.remove(marks, 1) end
+	elseif f[1] == "chunk" then
 		local ok, err = pcall(on_chunk, f[2] or "", tonumber(f[3]) or 1000, tonumber(f[4]) or 0)
 		if not ok then report("chunk error: " .. tostring(err)) end
 	elseif f[1] == "stream" and f[2] == "started" then
 		starting = false
+		marks = {}
+		last_index = -1
+		game_vol = math.max(0, math.min(100, tonumber(f[4]) or game_vol))
+	elseif f[1] == "stream" and f[2] == "ended" and mode ~= "off" then
+		-- the daemon stopped the stream while the game was away
+		stop_all()
+		request_stream()
 	elseif f[1] == "stream" and f[2] == "failed" then
 		-- The daemon could not start the stream (its reason arrives as a normal error message).
 		-- It is asked again when the PDA tab is opened or the daemon reconnects.
@@ -337,6 +439,70 @@ local function on_event(event, f)
 		stop_all()
 		mode = "off"
 	end
+end
+
+local function engine_mode()
+	return (mode == "head" or mode == "world") and requested and not failed
+end
+
+-- The PDA says what the player pressed, before it asks Spotify: "pause", "play", or "change"
+-- (next, previous, another track). Acting here is what makes the buttons feel immediate.
+function user(action)
+	if not engine_mode() then return end
+	if action == "pause" then pause_music()
+	elseif action == "play" then resume_music()
+	elseif action == "change" then
+		flush_music()
+		ignore_until = time_global() + CHANGE_MS
+	end
+end
+
+-- Volume buttons. Returns the new volume (0..100), or nil when the music is not played here
+-- and Spotify's own volume should be changed instead.
+function adjust_volume(delta)
+	if not engine_mode() then return nil end
+	game_vol = math.max(0, math.min(100, game_vol + delta))
+	if cur and mode == "head" then cur.snd.volume = game_vol / 100 end
+	spotify_radio.tell("gamevol " .. game_vol)
+	return game_vol
+end
+
+function get_volume()
+	return engine_mode() and game_vol or nil
+end
+
+-- How much audio is held here and not heard yet, in ms.
+function lag_ms()
+	local ms = 0
+	if cur then ms = math.max(0, cur.snd:length() - (time_global() - cur.t0)) end
+	for i = 1, #queue do ms = ms + queue[i].hop end
+	return ms
+end
+
+-- The track and position (ms) of what is being heard, or of what comes next while paused.
+-- Nil when nothing is held or the daemon has not said yet what it is.
+function heard()
+	if not engine_mode() then return nil end
+	local c, into = queue[1], 0
+	if cur then
+		local t = time_global() - cur.t0
+		c = cur.items[cur.count]
+		into = cur.lens[cur.count]
+		for i = cur.first, cur.count do
+			if t < cur.ends[i] then
+				c, into = cur.items[i], t - (cur.ends[i] - cur.lens[i])
+				break
+			end
+		end
+	end
+	if not c then return nil end
+	for i = #marks, 1, -1 do
+		local m = marks[i]
+		if m.index <= c.index then
+			return m, math.max(0, math.min(m.duration, m.pos + (c.index - m.index) * c.hop + into))
+		end
+	end
+	return nil
 end
 
 -- Called when the PDA tab opens: try again if the last request failed.
@@ -385,10 +551,11 @@ end
 
 function on_game_start()
 	spotify_radio.subscribe(on_event)
+	spotify_radio.heard = heard
 	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("actor_on_net_destroy", stop_all)
 	-- the main menu pauses the game: stop the sound before the engine tries to resume it
-	RegisterScriptCallback("main_menu_on_init", stop_sound)
-	RegisterScriptCallback("main_menu_on_quit", stop_sound)
+	RegisterScriptCallback("main_menu_on_init", function() take_back(true) end)
+	RegisterScriptCallback("main_menu_on_quit", function() take_back(true) end)
 end

@@ -47,7 +47,7 @@ cd daemon && dotnet build -c Release && cd ../test
 ./run_tests.sh
 ```
 
-Runs twice (file link, socket link), about five minutes each; `MODES=file` or `MODES=socket` runs one. `exit=0` after each run means all checks passed. `FAKE_BLOCK=400` or `800` fixes the fake engine's buffer size instead of alternating.
+Runs twice (file link, socket link), about six minutes each; `MODES=file` or `MODES=socket` runs one. `exit=0` after each run means all checks passed. `FAKE_BLOCK=400` or `800` fixes the fake engine's buffer size instead of alternating.
 
 ## Release zip
 

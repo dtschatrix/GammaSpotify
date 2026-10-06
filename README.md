@@ -40,7 +40,7 @@ Keep the daemon running while you play.
 
 Open the PDA's Radio tab.
 
-- Top right: previous, play / pause, next, volume, shuffle.
+- Top right: previous, play / pause, next, volume, shuffle. Volume is that of the music in game; Spotify's own volume is left alone.
 - **Search**: type, press Enter. **Play** starts a result, **Queue** queues a track.
 - **My playlists** lists your playlists.
 
@@ -48,11 +48,11 @@ In Spotify the game appears as a device named "STALKER PDA". Playback moves to i
 
 ## Limitations
 
-- The game is about five seconds behind Spotify. Skips, pauses and track changes are heard five seconds late.
+- A new track is heard a second or two after you pick it. Pause, play and volume act at once.
+- The game holds about six seconds of audio, so it is that far behind Spotify. The PDA shows the track and time you hear; the Spotify app is ahead. A pause or skip made in the Spotify app takes up to a second to reach the game.
 - Stereo only. Positional playback is in the code but disabled, because the engine's doppler bends the pitch when you move.
-- Volume follows the game's SFX slider.
-- The sound stops in the main menu and while paused, and resumes a few seconds after you return.
-- During loading screens Spotify keeps playing unheard. If the game is away for about 90 seconds, or you quit, Spotify is paused; it resumes when the game is back.
+- Volume also follows the game's SFX slider.
+- The music pauses with the game: in the main menu, while paused, while loading, and when you quit. It continues where it stopped, except after a loading screen, where a few seconds are skipped.
 - The game's own Radio tab is replaced.
 - Titles are transliterated to Latin letters by default (see `encoding`).
 - Search returns at most 10 results per type, which is Spotify's limit.
@@ -70,7 +70,8 @@ In Spotify the game appears as a device named "STALKER PDA". Playback moves to i
 | `encoding` | `ascii` | `ascii` transliterates titles; `windows-1251` keeps Cyrillic if your fonts have it. |
 | `searchLimit` | `10` | Results per type. |
 | `streamDeviceName` | `STALKER PDA` | Name of the game's Spotify device. |
-| `awayPauseSeconds` | `60` | How long after the game stops answering (about 30 s after its last message) Spotify is paused. |
+| `awaySeconds` | `3` | Spotify is paused when the game has been silent this long (paused, menu, loading, closed). |
+| `leadMs` | `6000` | How much audio the game is kept supplied with. |
 
 Do not change `chunkMs`.
 
@@ -83,7 +84,7 @@ Do not change `chunkMs`.
 
 ## How it works
 
-The daemon runs librespot as a Spotify Connect device, cuts its audio into one-second OGG files and writes them into the game's folders. The game script makes the engine load each file and chains it onto the sound already playing. Details in [`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md).
+The daemon runs librespot as a Spotify Connect device, cuts its audio into one-second OGG files and writes them into the game's folders. The game script makes the engine load each file and chains it onto the sound already playing. The daemon reads Spotify ahead of real time, so the game has its buffer within a moment of a track change. Details in [`docs/HOW-IT-WORKS.md`](docs/HOW-IT-WORKS.md).
 
 ## Credits
 

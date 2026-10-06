@@ -1,8 +1,27 @@
-import json, sys, urllib.parse
+# Stands in for Spotify's Web API. Like Spotify it only knows where playback was last reported
+# to be and counts on from there; fake_librespot.py does the reporting when the game's device plays.
+import json, sys, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 TRACKS = [("spotify:track:1", "Archangel", "Burial", 238000), ("spotify:track:2", "Señorita Ünïcode – “Тест”", "Молчат Дома", 200000)]
-S = {"device": "dev1", "playing": False, "idx": 0, "vol": 50, "active": False, "shuffle": False, "token": "tok1", "log": [], "context": None}
+S = {"device": "dev1", "playing": False, "idx": 0, "vol": 50, "active": False, "shuffle": False, "token": "tok1", "log": [], "context": None,
+     "pos": 12345, "at": time.monotonic(), "gen": 0}
+
+def progress():
+    p = S["pos"] + ((time.monotonic() - S["at"]) * 1000 if S["playing"] else 0)
+    return int(min(p, TRACKS[S["idx"]][3]))
+def report(pos, jump=False):
+    S["pos"], S["at"] = pos, time.monotonic()
+    if jump: S["gen"] += 1          # playback restarts somewhere else: the device has to load
+def do_act(name, arg=None):
+    if name == "play":
+        if not S["playing"]: S["at"] = time.monotonic(); S["playing"] = True
+    elif name == "pause":
+        S["pos"] = progress(); S["playing"] = False
+    elif name in ("next", "previous"):
+        S["idx"] = (S["idx"] + (1 if name == "next" else -1)) % len(TRACKS); S["playing"] = True; report(0, True)
+    elif name == "seek":
+        report(int(arg), True)
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -29,13 +48,22 @@ class H(BaseHTTPRequestHandler):
                 S["token"] = "tok3"; return self._send(200, {"access_token": "tok3", "expires_in": 3600, "refresh_token": "refresh3"})
             return self._send(400, {"error": "invalid_grant"})
         if p == "/_log": return self._send(200, S["log"])
-        if p == "/_state": return self._send(200, {"device": S["device"], "playing": bool(S.get("playing")), "transfers": S.get("transfers", [])})
+        if p == "/_state": return self._send(200, {"device": S["device"], "playing": bool(S.get("playing")), "transfers": S.get("transfers", []),
+                                                   "idx": S["idx"], "progress": progress(), "vol": S["vol"]})
+        if p == "/_ctl":      # for fake_librespot
+            return self._send(200, {"device": S["device"], "playing": S["playing"], "idx": S["idx"], "gen": S["gen"], "pos": S["pos"],
+                                    "progress": progress(), "durations": [t[3] for t in TRACKS]})
+        if p == "/_report": report(int(q["pos"][0])); return self._send(200, {})
+        if p == "/_advance":  # the device played a track to its end and went on to the next
+            S["idx"] = (S["idx"] + 1) % len(TRACKS); report(0); return self._send(200, {})
+        if p == "/_do":       # something done in another Spotify app
+            do_act(q["act"][0], q.get("ms", [None])[0]); return self._send(200, {})
         if p == "/_query": return self._send(200, {"q": S.get("last_query")})
         if not self._auth(): return
         if p == "/v1/me/player" and method == "GET":
             if not S["active"]: return self._send(204)
             t = TRACKS[S["idx"]]
-            return self._send(200, {"is_playing": S["playing"], "progress_ms": 12345, "shuffle_state": S["shuffle"],
+            return self._send(200, {"is_playing": S["playing"], "progress_ms": progress(), "shuffle_state": S["shuffle"],
                 "device": {"id": S["device"], "name": {"dev1": "DESKTOP", "pda": "STALKER PDA"}.get(S["device"], "?"), "volume_percent": S["vol"]},
                 "item": {"uri": t[0], "name": t[1], "duration_ms": t[3], "artists": [{"name": t[2]}]}})
         if p == "/v1/me/player/devices":
@@ -43,8 +71,9 @@ class H(BaseHTTPRequestHandler):
                                                  {"id": "dev1", "name": "DESKTOP", "type": "Computer", "is_restricted": False, "is_active": S["active"] and S["device"] == "dev1"},
                                                  {"id": "pda", "name": "STALKER PDA", "type": "Speaker", "is_restricted": False, "is_active": S["active"] and S["device"] == "pda"}]})
         if p == "/v1/me/player" and method == "PUT":
-            b = json.loads(body); S["device"] = b["device_ids"][0]; S["active"] = True
+            b = json.loads(body); pos = progress(); S["device"] = b["device_ids"][0]; S["active"] = True
             if b.get("play"): S["playing"] = True
+            report(pos, True)
             S["transfers"] = S.get("transfers", []) + [S["device"]]
             return self._send(204)
 
@@ -58,12 +87,11 @@ class H(BaseHTTPRequestHandler):
                     b = json.loads(body)
                     if "uris" in b: S["idx"] = [t[0] for t in TRACKS].index(b["uris"][0])
                     if "context_uri" in b: S["context"] = b["context_uri"]
+                    S["playing"] = True; report(0, True)
                 elif S["playing"]:
                     return self._send(403, {"error": {"status": 403, "message": "Player command failed: Restriction violated", "reason": "UNKNOWN"}})
-                S["playing"] = True
-            elif act == "pause": S["playing"] = False
-            elif act == "next": S["idx"] = (S["idx"] + 1) % len(TRACKS)
-            elif act == "previous": S["idx"] = (S["idx"] - 1) % len(TRACKS)
+                else: do_act("play")
+            elif act in ("pause", "next", "previous"): do_act(act)
             elif act == "volume": S["vol"] = int(q["volume_percent"][0])
             elif act == "shuffle": S["shuffle"] = q["state"][0] == "true"
             elif act == "queue": pass
@@ -81,4 +109,5 @@ class H(BaseHTTPRequestHandler):
     def do_PUT(self): self.handle_any("PUT")
     def do_POST(self): self.handle_any("POST")
 
-HTTPServer(("127.0.0.1", 47900), H).serve_forever()
+from http.server import ThreadingHTTPServer
+ThreadingHTTPServer(("127.0.0.1", 47900), H).serve_forever()

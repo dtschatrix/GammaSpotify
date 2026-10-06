@@ -9,9 +9,10 @@ namespace SpotifyRadio;
 /// Line protocol for the game, one command per line, tab-separated replies.
 ///   game -> daemon: hello | ping | state | toggle | play | pause | next | prev | vol N | volrel +-N |
 ///                   shuffle on|off | search TEXT | playlists | playuri URI | queue URI |
-///                   stream start MODE FOLDER | stream stop | log TEXT
+///                   stream start MODE FOLDER | stream stop | gamevol 0..100 | buf MS LAST [hold] | log TEXT
 ///   daemon -> game: hello | pong | state ... | ok CMD | error MSG | results_begin / result / results_end |
-///                   chunk NAME MS INDEX | stream started|stopped|failed|unavailable
+///                   chunk NAME MS INDEX | stream started MODE VOLUME | stream stopped|failed|unavailable|ended |
+///                   audio hold|resume|flush | track INDEX POS DURATION URI ARTIST TITLE
 ///
 /// Two transports carry the same lines:
 ///   - TCP on 127.0.0.1 (only usable when the game exposes LuaSocket, i.e. lua_debug 1)
@@ -88,7 +89,10 @@ public sealed class GameServer
     /// <summary>Set by Program once both objects exist.</summary>
     public GameAudio? Audio { get; set; }
 
-    public bool GameIsThere => ActiveLinks().Any();
+    private DateTime _lastHeardUtc = DateTime.MinValue;
+
+    /// <summary>Time since the game last said anything.</summary>
+    public TimeSpan GameQuiet => DateTime.UtcNow - _lastHeardUtc;
 
     public async Task BroadcastAsync(string[] fields, CancellationToken ct)
     {
@@ -197,6 +201,7 @@ public sealed class GameServer
 
         var link = new FileLink { OutPath = outPath };
         _fileLink = link;
+        _ = Task.Run(() => WatchCmdFileAsync(cmdPath, ct), CancellationToken.None);
         var offset = new FileInfo(cmdPath).Length;
         var pending = new List<byte>();
         Log.Info($"Waiting for the game (files in {dir}).");
@@ -249,14 +254,56 @@ public sealed class GameServer
         }
     }
 
+    /// <summary>
+    /// Commands are handled one at a time and a Spotify call can take seconds, so whether the
+    /// game is still writing is watched separately.
+    /// </summary>
+    private async Task WatchCmdFileAsync(string cmdPath, CancellationToken ct)
+    {
+        long seen = -1;
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(200, ct);
+                var info = new FileInfo(cmdPath);
+                var length = info.Exists ? info.Length : 0;
+                if (seen >= 0 && length != seen) _lastHeardUtc = DateTime.UtcNow;
+                seen = length;
+            }
+            catch (OperationCanceledException) { return; }
+            catch (IOException) { }
+        }
+    }
+
     private async Task HandleAsync(ILink link, string line, CancellationToken ct)
     {
         var space = line.IndexOf(' ');
         var cmd = (space < 0 ? line : line[..space]).ToLowerInvariant();
         var arg = space < 0 ? "" : line[(space + 1)..].Trim();
+        _lastHeardUtc = DateTime.UtcNow;
+        if (cmd == "buf")
+        {
+            // how much audio the game holds, about once a second; also shows that it is running
+            // buf <ms held> <index of the last chunk received> [hold]
+            var b = arg.Split(' ');
+            if (b.Length >= 2 && int.TryParse(b[0], out var ms) && int.TryParse(b[1], out var last))
+                Audio?.OnGameBuffer(ms, last, b.Length > 2 && b[2] == "hold");
+            return;
+        }
         if (cmd == "ping")
         {
             await SendAsync(link, ct, "pong");
+            return;
+        }
+        if (cmd == "gamevol")
+        {
+            // volume of the in-game sound; the game applies it itself, this only remembers it
+            if (int.TryParse(arg, out var v))
+            {
+                _cfg.GameVolume = Math.Clamp(v, 0, 100);
+                try { _cfg.Save(); } catch (IOException) { /* keep it for this run */ }
+            }
             return;
         }
         if (cmd == "log")
@@ -279,7 +326,7 @@ public sealed class GameServer
                 else if (parts.Length == 3 && parts[0] == "start")
                 {
                     await Audio!.StartStreamAsync(parts[1], parts[2], ct);
-                    await SendAsync(link, ct, "stream", "started", parts[1]);
+                    await SendAsync(link, ct, "stream", "started", parts[1], _cfg.GameVolume.ToString());
                 }
                 else if (Audio is not null)
                 {
@@ -314,8 +361,8 @@ public sealed class GameServer
                     break;
                 case "play": await _spotify.PlayAsync(ct); break;
                 case "pause": await _spotify.PauseAsync(ct); break;
-                case "next": await _spotify.NextAsync(ct); break;
-                case "prev": await _spotify.PreviousAsync(ct); break;
+                case "next": Audio?.ExpectChange(); await _spotify.NextAsync(ct); break;
+                case "prev": Audio?.ExpectChange(); await _spotify.PreviousAsync(ct); break;
                 case "vol":
                     await _spotify.SetVolumeAsync(ParseInt(arg), ct);
                     break;
@@ -330,6 +377,7 @@ public sealed class GameServer
                     await _spotify.SetShuffleAsync(arg is "on" or "1" or "true", ct);
                     break;
                 case "playuri":
+                    Audio?.ExpectChange();
                     await _spotify.PlayUriAsync(arg, ct);
                     break;
                 case "queue":
@@ -415,6 +463,7 @@ public sealed class GameServer
     private async Task PollOnceAsync(bool force, CancellationToken ct)
     {
         var state = await _spotify.GetStateAsync(ct);
+        if (Audio is not null) await Audio.OnPolledStateAsync(state, ct);
         if (!force && state.Signature == _lastSignature) return;
         _lastSignature = state.Signature;
         foreach (var link in ActiveLinks().ToList())

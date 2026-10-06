@@ -210,13 +210,25 @@ function SpotifyTab:InitCallbacks()
 		self:AddCallback(name, ui_events.BUTTON_CLICKED, fn, self)
 	end
 
-	-- place_here: for the switched-off world mode (moves the radio to the player); does nothing in head mode
-	click("btn_prev",      function() spotify_radio_stream.place_here(); spotify_radio.send("prev") end)
-	click("btn_play",      function() spotify_radio_stream.place_here(); spotify_radio.send("play") end)
-	click("btn_pause",     function() spotify_radio.send("pause") end)
-	click("btn_next",      function() spotify_radio_stream.place_here(); spotify_radio.send("next") end)
-	click("btn_vol_down",  function() spotify_radio.send("volrel -10") end)
-	click("btn_vol_up",    function() spotify_radio.send("volrel 10") end)
+	-- The stream script is told first, so the sound in game reacts before Spotify does.
+	-- place_here is for the switched-off world mode (moves the radio to the player).
+	local stream = spotify_radio_stream
+	local function volume(delta)
+		-- the sound's own volume when the music plays in game, Spotify's otherwise
+		if not stream.adjust_volume(delta) then spotify_radio.send("volrel " .. delta) end
+	end
+	click("btn_prev",      function() stream.place_here(); stream.user("change"); spotify_radio.send("prev") end)
+	click("btn_play", function()
+		stream.place_here(); stream.user("play")
+		if spotify_radio.send("play") then spotify_radio.expect_status("playing") end
+	end)
+	click("btn_pause", function()
+		stream.user("pause")
+		if spotify_radio.send("pause") then spotify_radio.expect_status("paused") end
+	end)
+	click("btn_next",      function() stream.place_here(); stream.user("change"); spotify_radio.send("next") end)
+	click("btn_vol_down",  function() volume(-10) end)
+	click("btn_vol_up",    function() volume(10) end)
 	click("btn_shuffle",   function()
 		spotify_radio.send("shuffle " .. (spotify_radio.state.shuffle and "off" or "on"))
 	end)
@@ -242,6 +254,7 @@ function SpotifyTab:OnRow(row, queue)
 		spotify_radio.queue_uri(item.uri)
 	else
 		spotify_radio_stream.place_here()
+		spotify_radio_stream.user("change")
 		spotify_radio.play_uri(item.uri)
 	end
 end
@@ -282,7 +295,7 @@ function SpotifyTab:RenderRows()
 end
 
 function SpotifyTab:Refresh()
-	local s = spotify_radio.state
+	local s = spotify_radio.shown
 	local now = time_global()
 
 	-- top line
@@ -307,12 +320,11 @@ function SpotifyTab:Refresh()
 	else
 		local parts = {}
 		if s.duration > 0 then
-			local pos = s.progress
-			if s.status == "playing" then pos = math.min(s.duration, pos + (now - s.received_at)) end
-			parts[#parts + 1] = fmt_time(pos) .. " / " .. fmt_time(s.duration)
+			parts[#parts + 1] = fmt_time(spotify_radio.shown_position()) .. " / " .. fmt_time(s.duration)
 		end
 		if s.status == "paused" then parts[#parts + 1] = "paused" end
-		if s.volume >= 0 then parts[#parts + 1] = "vol " .. s.volume .. "%" end
+		local volume = spotify_radio_stream.get_volume() or s.volume
+		if volume >= 0 then parts[#parts + 1] = "vol " .. volume .. "%" end
 		if s.shuffle then parts[#parts + 1] = "shuffle" end
 		if s.device ~= "" then parts[#parts + 1] = cut(s.device, 20) end
 		status = table.concat(parts, "   ")

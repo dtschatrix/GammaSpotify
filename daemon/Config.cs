@@ -20,8 +20,12 @@ public sealed class Config
     public string StreamDeviceName { get; set; } = "STALKER PDA";
     /// <summary>Length of each audio chunk handed to the game. The game script expects 1000; see spotify_radio_stream.script before changing it.</summary>
     public int ChunkMs { get; set; } = 1000;
-    /// <summary>Seconds after the game stops answering (about 30 s after its last message) before Spotify is paused.</summary>
-    public int AwayPauseSeconds { get; set; } = 60;
+    /// <summary>Seconds without a word from the game (paused, main menu, loading, closed) before Spotify is paused. It resumes when the game is back.</summary>
+    public int AwaySeconds { get; set; } = 3;
+    /// <summary>How much audio the game is kept supplied with, in ms. It needs five seconds in hand to start a sound; reading Spotify ahead of real time fills that in a moment.</summary>
+    public int LeadMs { get; set; } = 6000;
+    /// <summary>Volume of the in-game sound, 0..100, set with the PDA's volume buttons.</summary>
+    public int GameVolume { get; set; } = 100;
     /// <summary>Text sent to the game: "ascii" (transliterated), "windows-1251" or "utf-8".</summary>
     public string Encoding { get; set; } = "ascii";
     /// <summary>Part of the device name to prefer when nothing is active. Empty = this PC, else first found.</summary>

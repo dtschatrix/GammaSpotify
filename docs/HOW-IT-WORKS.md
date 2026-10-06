@@ -55,25 +55,46 @@ The script keeps an upper bound on the read position:
 
 A chunk is offered every update and attached only while the bound is at least 300 ms short of the end. If not, the sound is left to run out and a new one starts from the newest chunks.
 
-Refusals only happen while a chunk is waiting, so a sound starts with five chunks (three attached, two waiting). That is the five-second delay.
+Refusals only happen while a chunk is waiting, so a sound starts with five chunks (three attached, two waiting).
 
-A chunk file is deleted once the chunk three places after it has been accepted.
+A chunk file is deleted 1.5 s after it has been heard to its end, and never while it is one of the last three the engine was given.
+
+## Latency
+
+Five chunks at one per second would mean five seconds before anything is heard. librespot's pipe output is as fast as its reader, so the daemon reads ahead of real time until the game holds `leadMs` (6 s) of audio, then keeps it there. After a start or a track change the five chunks arrive within a moment.
+
+- Once a second the game reports how much it holds and the last chunk it received (`buf <ms> <index>`). The daemon paces its reading on that. When the game holds too much the daemon slows to half speed rather than stopping: librespot handles pause and skip only between writes. Reading ahead is also capped by a budget that does not depend on the reports.
+- Pause: the game stops the sound and puts the chunks not heard yet back in its queue; play starts a sound from them. A chunk is only played from its start, so the one being heard is kept or dropped, whichever is nearer.
+- Track change: the game drops everything it holds. The daemon discards audio until the gap that precedes the new track, then starts a new segment (`audio flush`).
+- The PDA tells the stream script what was pressed before the command goes to Spotify, so the sound reacts in the same frame. For pauses, skips and seeks made elsewhere the daemon notices the audio stopping (no data for 250 ms), asks Spotify why, and sends `audio hold`, `audio resume` or `audio flush`.
+- The PDA's volume buttons set the volume of the sound object. The daemon stores the value (`gamevol`) and returns it with `stream started`.
+
+## What the PDA shows
+
+What is heard is seconds behind Spotify, so Spotify's own position is no use for the display. Spotify's position is "where the player last reported plus the time since", at whatever speed the audio is read. The audio read at the moment of a report is therefore at the reported position:
+
+- After a start or flush, the first audio of the segment is at `progress - (time since it was read)`.
+- When the next track starts without a break, its first audio was read `progress` ago; the daemon keeps the read time of each chunk and finds the one.
+
+The daemon sends `track <chunk> <ms> <duration> <uri> <artist> <title>`: from that chunk on it is this track, and the chunk starts at that position. The PDA shows the track and time of the chunk being played.
 
 ## When the stream runs
 
 The script asks for the stream (`stream start head <level folder>`) as soon as the daemon answers. Scripts restart on every level change, so it is asked for again then; chunks announced before the daemon confirms are ignored. The daemon moves Spotify playback to its librespot device without changing play / pause.
 
-While the game does not answer (loading, paused), the daemon keeps reading audio but writes no files. After `awayPauseSeconds` more it pauses Spotify, and resumes it on the next `stream start`. Without `librespot.exe` it answers `stream unavailable` and the mod is a remote control for the Spotify app.
+Scripts do not run while the game is paused, in the main menu or loading. When the game has said nothing for `awaySeconds` the daemon pauses Spotify, and resumes it at the game's next message. The game keeps its queue meanwhile, so nothing is lost. If audio flows for ten seconds while the game is away (someone pressed play elsewhere), the daemon stops the stream and sends `stream ended` when the game is back, and the game asks again.
+
+Without `librespot.exe` the daemon answers `stream unavailable` and the mod is a remote control for the Spotify app.
 
 ## Stopping instead of resuming
 
 When the engine stops rendering a chained sound and resumes it (pause, culling, its channel taken by another sound), it rewinds to the heard position, which is usually in a file it has already released, and plays about a second of wrong audio. The script therefore:
 
 - stops the sound when the main menu opens, and on the first update after game time stood still while real time advanced;
-- stops the sound when the effects volume is near zero, before the engine culls it;
+- stops the sound when the volume is near zero, before the engine culls it;
 - gives the head-mode sound a large `min_distance`, which gives a 2D sound top priority so its channel is not taken.
 
-A new sound is then started from the newest chunks.
+A new sound is then started from the chunks that were not heard (after a pause) or from the newest ones (after being inaudible).
 
 ## Encoder
 
@@ -92,4 +113,4 @@ Chunks are encoded with the `OggVorbisEncoder` NuGet package. Checked by decodin
 
 ## Tests
 
-`test/run_tests.sh` runs the daemon against `mock_spotify.py` (fake Web API) and `fake_librespot.py` (synthetic PCM), and runs the game scripts under LuaJIT in `harness_ui.lua`. The harness fakes the UI, the file index, and the sound streamer: three buffers of 400 or 800 ms, the two-tail limit, and a counter for attaches made after the data ran out, which must be zero. `audio_check.py` decodes the chunks the fake engine received and compares them with the source. The harness enables world mode for its run, and loads a second, unmodified copy of the stream script to check what ships.
+`test/run_tests.sh` runs the daemon against `mock_spotify.py` (fake Web API) and `fake_librespot.py`, and runs the game scripts under LuaJIT in `harness_ui.lua`. The mock keeps a position the way Spotify does; the fake librespot follows its play / pause / track state, leaves a gap when a track loads, and plays track N at position P from a known place in the test audio. The harness fakes the UI, the file index, and the sound streamer: three buffers of 400 or 800 ms, the two-tail limit, and a counter for attaches made after the data ran out, which must be zero. `audio_check.py` decodes the chunks the fake engine received and compares them with the source. `heard_check.py` compares the track and time the PDA showed with the audio the fake engine was playing at that moment. The harness enables world mode for part of its run, then loads unmodified copies of the stream script to check what ships. `QUICK=1` skips the world-mode part.

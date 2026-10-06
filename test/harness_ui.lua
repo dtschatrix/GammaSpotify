@@ -79,6 +79,7 @@ sound_object = setmetatable({ s2d = 2, s3d = 0 }, { __call = function(_, path, s
 	SOUNDS[#SOUNDS + 1] = o
 	local function keep(p)   -- keep a copy of what the engine was given, for the audio check afterwards
 		if KEEP then KEPT = (KEPT or 0) + 1; os.execute(string.format('cp "%s" "%s/%05d.ogg"', unix(SND_ROOT .. p .. ".ogg"), KEEP, KEPT)) end
+		if KEEP2 then os.execute(string.format('cp "%s" "%s/"', unix(SND_ROOT .. p .. ".ogg"), KEEP2)) end
 	end
 	if o.ok then keep(path) end
 	function o:length() return self.ok and #self.parts * self.hop or 576 end
@@ -90,7 +91,7 @@ sound_object = setmetatable({ s2d = 2, s3d = 0 }, { __call = function(_, path, s
 	-- Picking a chained sound up again after that crashes the real engine, so it must never be seen.
 	function o:culled()
 		if not self.at or self.stopped then return false end
-		if self.kind == "2d" then return EFF < 0.01 end
+		if self.kind == "2d" then return EFF * self.volume < 0.01 end
 		local d = ACTOR_POS:distance_to(self.pos)
 		local occluded = self.stype ~= snd_type.world_ambient and WALL and 0.1 or 1
 		return d > self.max_distance or math.min(self.volume, (self.max_distance - d) / (self.max_distance - self.min_distance)) * EFF * occluded < 0.01
@@ -292,27 +293,47 @@ check(q:find("\\u041a\\u0438\\u043d\\u043e abc", 1, true), "Cyrillic query reach
 -- Spotify through the engine: the daemon turns its PCM source into chunks, the game chains them into one sound
 local played_dir = unix(SND_ROOT) .. "spotify_radio/"
 local function count_files() local n = 0; for _ in io.popen('ls "' .. played_dir .. '" 2>/dev/null'):lines() do n = n + 1 end; return n end
-local function api(path) return io.popen("curl -s http://127.0.0.1:47900" .. path):read("*a") end
-HOP = 1000
-KEEP = os.getenv("KEEP_DIR"); os.execute('rm -rf "' .. KEEP .. '"; mkdir -p "' .. KEEP .. '"')
-check(tab.btn_stream == nil and stream.get_mode() == "off", "no stream switch in the PDA; nothing streams while disabled")
-stream.set_mode("world"); run(400)
-check(stream.get_mode() == "world", "world mode (enabled for the tests only)")
-local t_start = time_global()
-run(15600)
-local snd = SOUNDS[#SOUNDS]
-check(api("/_state"):find('"device": "pda"'), "playback was moved to the game's Spotify device")
-check(#STARTED == 1 and snd.kind == "3d", "one continuous 3D sound, started once (starts: " .. #STARTED .. ")")
-check(#snd.parts >= 10 and #snd.parts <= 16 and snd:playing(), "about one chunk per second is chained on (real-time pacing): " .. #snd.parts .. " in 16 s")
-check(FREEZES == 0 and SILENCES == 0 and REFUSED > 0, "the engine never read to the end of its data (silences " .. SILENCES .. ", freezes " .. FREEZES .. ", refused offers " .. REFUSED .. ")")
-check(count_files() <= 9, "finished chunk files are deleted as it goes, " .. count_files() .. " on disk")
-local starts0 = #STARTED
-local world_parts = #snd.parts
-KEEP = nil
-
--- world mode: distance, walls, pauses. The engine must never get to cull the playing sound.
+local function api(path) return io.popen("curl -s 'http://127.0.0.1:47900" .. path .. "'"):read("*a") end
+local function phone(act, ms) api("/_do?act=" .. act .. (ms and ("&ms=" .. ms) or "")) end   -- done in another Spotify app
+local function spotify(key) return api("/_state"):match('"' .. key .. '": ([%w]+)') end
+local function wait_for(pred, ms)
+	local stop = socket.gettime() + ms / 1000
+	while socket.gettime() < stop do if pred() then return true end; run(30) end
+	return pred()
+end
 local function chunk_no(p) return tonumber(p:match("(%d+)$")) end
 local function gapless(o) for i = 2, #o.parts do if chunk_no(o.parts[i]) ~= chunk_no(o.parts[i - 1]) + 1 then return false end end return true end
+local function newest() return SOUNDS[#SOUNDS] end
+-- the chunk the fake engine is playing right now
+local function heard_chunk(o) return chunk_no(o.parts[math.min(#o.parts, math.floor(o.heard / 1000) + 1)]) end
+-- waits for a sound other than "old" to play; returns it and how long that took
+local function next_sound(old, ms)
+	local t = socket.gettime()
+	local ok = wait_for(function() return newest() ~= old and newest():playing() end, ms)
+	return ok and newest() or nil, socket.gettime() - t
+end
+HOP = 1000
+KEEP = os.getenv("KEEP_DIR"); os.execute('rm -rf "' .. KEEP .. '"; mkdir -p "' .. KEEP .. '"')
+phone("play"); run(1200)
+check(tab.btn_stream == nil and stream.get_mode() == "off", "no stream switch in the PDA; nothing streams while disabled")
+local t0, n, world_parts = socket.gettime(), 0, 0
+if not os.getenv("QUICK") then   -- QUICK=1 skips the world-mode part while working on the rest
+stream.set_mode("world")
+check(wait_for(function() return #STARTED >= 1 end, 6000) and stream.get_mode() == "world",
+	string.format("world mode (enabled for the tests only): heard %.1f s after asking", socket.gettime() - t0))
+run(15000)
+local snd = newest()
+check(api("/_state"):find('"device": "pda"'), "playback was moved to the game's Spotify device")
+check(#STARTED == 1 and snd.kind == "3d", "one continuous 3D sound, started once (starts: " .. #STARTED .. ")")
+check(#snd.parts >= 13 and #snd.parts <= 20 and snd:playing(), "chunks are chained on as the engine takes them: " .. #snd.parts .. " in 15 s")
+check(FREEZES == 0 and SILENCES == 0 and REFUSED > 0, "the engine never read to the end of its data (silences " .. SILENCES .. ", freezes " .. FREEZES .. ", refused offers " .. REFUSED .. ")")
+check(stream.lag_ms() >= 4000 and stream.lag_ms() <= 9000, "about six seconds of audio are held: " .. stream.lag_ms() .. " ms")
+check(count_files() <= 14, "finished chunk files are deleted as it goes, " .. count_files() .. " on disk")
+local starts0 = #STARTED
+world_parts = #snd.parts
+KEEP = nil
+
+-- world mode: distance and walls. The engine must never get to cull the playing sound.
 check(snd.stype == snd_type.world_ambient and snd.owner == nil and snd.max_distance >= 500, "world sound is un-occluded, ownerless and has a huge engine range")
 check(math.abs(snd.volume - 1) < 0.05, "full volume next to the radio: " .. snd.volume)
 WALL = true; ACTOR_POS:set(10 + 23.5, 0, -5); run(1500)
@@ -322,71 +343,179 @@ check(#STARTED == starts0 and snd:playing() and snd.volume * EFF >= 0.02 and snd
 check(gapless(snd) and #snd.parts >= world_parts + 3, "and is still chained without a gap (" .. #snd.parts .. " chunks)")
 ACTOR_POS:set(10 + 100, 0, -5); run(4000)     -- far out of range
 check(snd.stopped and #STARTED == starts0, "out of earshot the sound is stopped and none is started")
-check(count_files() <= 6, "out of earshot only the newest chunks are kept, " .. count_files() .. " on disk")
+check(count_files() <= 8, "out of earshot only the newest chunks are kept, " .. count_files() .. " on disk")
 ACTOR_POS:set(10 + 5, 0, -5); run(700)
-local snd2 = SOUNDS[#SOUNDS]
+local snd2 = newest()
 check(#STARTED == starts0 + 1 and snd2 ~= snd and snd2.kind == "3d" and snd2.pos.x == 10, "walking back starts it again at once, at the same spot")
 check(chunk_no(snd2.parts[1]) > chunk_no(snd.parts[#snd.parts]), "and with current audio, not what was missed (chunk " .. chunk_no(snd2.parts[1]) .. " after " .. chunk_no(snd.parts[#snd.parts]) .. ")")
-ACTOR_POS:set(300, 2, 40); click(tab, "btn_next"); run(300)
-check(#STARTED == starts0 + 1 and snd2.pos.x == 300 and snd2.pos.z == 40 and not snd2.stopped, "pressing next moves the radio to where the player stands")
+ACTOR_POS:set(300, 2, 40); click(tab, "btn_next")
+local snd3 = next_sound(snd2, 6000)
+check(snd2.stopped and snd3 and snd3.pos.x == 300 and snd3.pos.z == 40, "pressing next moves the radio to where the player stands")
 run(3000)
-check(snd2:playing() and gapless(snd2) and #snd2.parts >= 5, "and it keeps playing there")
--- game paused (alt-tab, pause key): no script updates, game time frozen, chunks keep coming
-pause_game(true); run(5000); pause_game(false)
-for _, f in ipairs(cbs.actor_on_update) do f() end          -- first frame after the pause: scripts run before the sound update
-check(snd2.stopped, "after a pause the old sound is stopped before the engine can resume it")
-run(1500)
-local snd3 = SOUNDS[#SOUNDS]
-check(snd3 ~= snd2 and snd3:playing() and chunk_no(snd3.parts[1]) >= chunk_no(snd2.parts[#snd2.parts]) + 2, "and a new one starts from current audio (chunk " .. chunk_no(snd3.parts[1]) .. " after " .. chunk_no(snd2.parts[#snd2.parts]) .. ")")
--- a long stay in the menu: the daemon gives up on the game meanwhile, so the stream is asked for again
-pause_game(true); run(17000); pause_game(false); run(9000)
-local snd_long = SOUNDS[#SOUNDS]
-check(snd3.stopped and snd_long ~= snd3 and snd_long:playing() and chunk_no(snd_long.parts[1]) <= 3, "after a long pause the stream is requested again and plays (first chunk " .. chunk_no(snd_long.parts[1]) .. ")")
-snd3 = snd_long
-for _, f in ipairs(cbs.main_menu_on_init) do f({}) end
-check(snd3.stopped, "opening the main menu stops the sound")
-run(5500)
-local snd4 = SOUNDS[#SOUNDS]
-EFF = 0; run(300)
-check(snd4 ~= snd3 and snd4.stopped, "effects volume at zero: sound stopped by the script, not culled by the engine")
-EFF = 0.3; run(5500)
-snd = SOUNDS[#SOUNDS]
-check(snd ~= snd4 and snd:playing(), "volume back: playing again")
+check(snd3 and snd3:playing() and gapless(snd3) and #snd3.parts >= 5, "and it keeps playing there")
 -- doppler: the engine plays a 3D sound faster or slower than real time while the player moves
 DOPPLER = 1.08; run(6000); DOPPLER = 0.92; run(6000); DOPPLER = 1; run(6000)
-check(FREEZES == 0, "playback speed off by 8% either way never leads to a late attach (sounds started: " .. #STARTED .. ")")
-snd = SOUNDS[#SOUNDS]
-check(CULLED == 0 and FREEZES == 0, "the engine never culled a playing sound and never got a late attach (culled frames: " .. CULLED .. ", freezes: " .. FREEZES .. ")")
+check(CULLED == 0 and FREEZES == 0, "the engine never culled a playing sound, and playback off by 8% either way never led to a late attach (culled frames: " .. CULLED .. ", freezes: " .. FREEZES .. ", sounds: " .. #STARTED .. ")")
+snd = newest()
 WALL = false
 stream.set_mode("head"); run(9000)
 if os.getenv("SOAK") then local n, sil = #STARTED, SILENCES; run(tonumber(os.getenv("SOAK")) * 1000); print("SOAK head: new sounds " .. (#STARTED - n) .. ", freezes " .. FREEZES .. ", silences " .. (SILENCES - sil)) end
 check(FREEZES == 0, "head mode: no late attach either")
-check(stream.get_mode() == "head" and SOUNDS[#SOUNDS].kind == "2d" and snd.stopped, "head mode: old sound stopped, plays 2D")
-stream.set_mode("off"); local n = #SOUNDS; run(3000)
+check(stream.get_mode() == "head" and newest().kind == "2d" and snd.stopped, "head mode: old sound stopped, plays 2D")
+stream.set_mode("off"); n = #SOUNDS; run(3000)
 check(stream.get_mode() == "off" and #SOUNDS == n and SOUNDS[n].stopped, "off stops it")
 check(api("/_state"):find('"device": "dev1"'), "playback was handed back to the desktop app")
 check(count_files() == 0, "no chunk files left behind after stopping, " .. count_files() .. " on disk")
+end
 
 -- As shipped: a fresh copy of the script, as after loading a save or changing level. No click anywhere.
-local shipped = load_script("spotify_radio_stream", true)
+local function fresh_copy()
+	local copy = load_script("spotify_radio_stream", true)
+	for k, v in pairs(copy) do if type(v) == "function" then stream[k] = v end end   -- the PDA talks to this copy now
+	return copy
+end
+KEEP2 = os.getenv("KEEP_DIR") .. ".chunks"; os.execute('rm -rf "' .. KEEP2 .. '"; mkdir -p "' .. KEEP2 .. '"')
+local HEARD = io.open(os.getenv("KEEP_DIR") .. ".heard", "w")
+-- Notes what the fake engine is playing and what the PDA claims; heard_check.py compares them with the audio.
+local function sample(label)
+	local o = newest()
+	if not (o:playing() and o.heard and radio.shown.heard) then check(false, "nothing to sample: " .. label) return end
+	run(200)
+	local i = math.min(#o.parts, math.floor(o.heard / 1000) + 1)
+	HEARD:write(table.concat({ label, o.parts[i]:match("[^\\]+$"), math.floor(o.heard - (i - 1) * 1000), radio.shown.uri, math.floor(radio.shown_position()) }, "\t"), "\n")
+	HEARD:flush()
+end
+phone("play")
+local shipped = fresh_copy()
+n = #SOUNDS; t0 = socket.gettime()
 shipped.on_game_start()
-n = #SOUNDS; run(9000)
-local auto = SOUNDS[#SOUNDS]
-check(shipped.get_mode() == "head" and #SOUNDS > n and auto.kind == "2d" and auto:playing(), "as shipped the music plays in game by itself after a load")
+local auto, took = next_sound(SOUNDS[n], 8000)
+check(auto and shipped.get_mode() == "head" and auto.kind == "2d", string.format("as shipped the music plays in game by itself after a load, %.1f s after the script starts", took))
+check(took < 3.5, "which takes under 3.5 s")
 check(api("/_state"):find('"device": "pda"'), "and Spotify was moved to the game's device")
 check(shipped.set_mode("world") == "head", "as shipped world mode cannot be selected")
--- The game goes away for long (loading, alt-tabbed in a menu, quit): the daemon pauses Spotify, and resumes it when the game is back.
-radio.send("play"); run(1500)
-pause_game(true); run(45000)
-if arg[2] ~= "socket" then   -- over TCP a paused game still counts as present; only a closed one is "away"
-	check(api("/_state"):find('"playing": false'), "game away for long: the daemon paused Spotify")
+run(5000)
+check(shipped.lag_ms() >= 4000 and shipped.lag_ms() <= 9000, "about six seconds of audio are held: " .. shipped.lag_ms() .. " ms")
+check(radio.shown.heard and tab.now_playing:GetText() ~= "Nothing playing", "the PDA shows the track and time of what is heard: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText())
+sample("start")
+
+-- volume buttons: the sound's own volume, at once; Spotify's volume is left alone
+local vol0 = spotify("vol")
+click(tab, "btn_vol_down")
+check(math.abs(newest().volume - 0.9) < 0.001, "volume down changes the playing sound in the same frame: " .. newest().volume)
+run(600)
+check(tab.status:GetText():find("vol 90%%") and spotify("vol") == vol0, "the PDA shows it and Spotify's own volume is untouched: " .. tab.status:GetText())
+
+-- pause and play in the PDA
+local s1 = newest(); local at = heard_chunk(s1)
+click(tab, "btn_pause")
+check(s1.stopped, "pause in the PDA stops the sound in the same frame")
+run(300)
+check(tab.btn_play.shown and not tab.btn_pause.shown, "and the button flips without waiting for Spotify")
+run(2500)
+local p1 = radio.shown_position(); run(1000)
+check(spotify("playing") == "false" and newest() == s1 and radio.shown_position() == p1, "Spotify is paused, nothing plays, the time stands still")
+click(tab, "btn_play")
+local s2; s2, took = next_sound(s1, 3000)
+check(s2 and took < 0.5, string.format("play starts it again %.2f s later", took))
+check(s2 and chunk_no(s2.parts[1]) - at >= 0 and chunk_no(s2.parts[1]) - at <= 1, "from where it stopped (chunk " .. (s2 and chunk_no(s2.parts[1]) or -1) .. ", was in " .. at .. ")")
+run(3000)
+check(spotify("playing") == "true" and s2:playing() and gapless(s2), "and it keeps playing")
+sample("after pause")
+
+-- next in the PDA
+local title = tab.now_playing:GetText()
+s1 = newest(); click(tab, "btn_next")
+check(s1.stopped, "next in the PDA stops the old track in the same frame")
+s2, took = next_sound(s1, 8000)
+check(s2 and took < 3.5, string.format("the new track is heard %.1f s later", took))
+run(2500)
+check(tab.now_playing:GetText() ~= title and radio.shown.heard and radio.shown_position() < 7000, "and the PDA shows it from its start: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText())
+sample("after next")
+
+-- the same things done from another Spotify app
+s1 = newest(); t0 = socket.gettime(); phone("pause")
+check(wait_for(function() return s1.stopped end, 4000), string.format("paused from the phone: the sound stops %.1f s later", socket.gettime() - t0))
+at = heard_chunk(s1); run(2000)
+check(newest() == s1, "and stays stopped")
+phone("play")
+s2, took = next_sound(s1, 4000)
+check(s2 and chunk_no(s2.parts[1]) - at >= 0 and chunk_no(s2.parts[1]) - at <= 1, string.format("resumed from the phone: plays again %.1f s later, from where it stopped", took))
+run(3000); sample("after phone pause")
+title = tab.now_playing:GetText()
+s1 = newest(); t0 = socket.gettime(); phone("next")
+check(wait_for(function() return s1.stopped end, 4000), string.format("skipped from the phone: the old track stops %.1f s later", socket.gettime() - t0))
+s2, took = next_sound(s1, 8000)
+run(2500)
+check(s2 and tab.now_playing:GetText() ~= title and radio.shown_position() < 9000, string.format("and the new one is heard %.1f s after that: %s | %s", took, tab.now_playing:GetText(), tab.status:GetText()))
+sample("after phone next")
+
+-- a track ending by itself: Spotify moves on while the game still plays the end of the old one
+local dur = spotify("idx") == "0" and 238000 or 200000
+s1 = newest(); phone("seek", dur - 13000)
+s2 = next_sound(s1, 8000)
+run(2500)
+check(s2 and radio.shown_position() >= dur - 13000 and radio.shown_position() <= dur - 6000, "a seek from the phone is followed: " .. tab.status:GetText())
+sample("after seek")
+title = tab.now_playing:GetText()
+check(wait_for(function() return spotify("progress") + 0 < 10000 end, 15000), "Spotify reaches the next track")
+local behind = dur - radio.shown_position()
+check(tab.now_playing:GetText() == title and behind > 2000, string.format("while the PDA still shows the old one, %.1f s from its end", behind / 1000))
+check(wait_for(function() return tab.now_playing:GetText() ~= title end, 12000), "the PDA changes over when the new track is heard: " .. tab.now_playing:GetText())
+check(radio.shown_position() < 2500, "with its time starting near zero: " .. tab.status:GetText())
+check(newest() == s2 and s2:playing() and gapless(s2), "and the sound was not interrupted")
+run(2000); sample("after track end")
+
+-- the game paused (pause key, console, alt-tab without g_always_active): no script updates, game time frozen
+for _, secs in ipairs({ 7, 40 }) do
+	s1 = newest(); at = heard_chunk(s1)
+	pause_game(true); run(secs * 1000)
+	check(spotify("playing") == "false", "game paused for " .. secs .. " s: the daemon paused Spotify")
+	pause_game(false)
+	for _, f in ipairs(cbs.actor_on_update) do f() end          -- first frame after the pause: scripts run before the sound update
+	check(s1.stopped, "the old sound is stopped before the engine can resume it")
+	s2, took = next_sound(s1, 5000)
+	check(s2 and took < 1.5 and chunk_no(s2.parts[1]) - at >= 0 and chunk_no(s2.parts[1]) - at <= 1,
+		string.format("the music continues %.1f s after the game does, from where it stopped (chunk %d, was in %d)", took, s2 and chunk_no(s2.parts[1]) or -1, at))
+	run(4000)
+	check(spotify("playing") == "true" and s2:playing() and gapless(s2), "Spotify was resumed and it keeps playing")
+	sample("after a " .. secs .. " s game pause")
 end
-pause_game(false); run(12000)
-local back = SOUNDS[#SOUNDS]
-check(api("/_state"):find('"playing": true') and back ~= auto and back:playing(), "game back: Spotify resumed and the music plays again")
-check(FREEZES == 0, "still no late attach")
+-- the game is away and someone starts the music from the phone anyway: nobody takes the chunks,
+-- so the daemon stops making them; the game asks for the stream again when it is back
+s1 = newest()
+pause_game(true); run(5000); phone("play"); run(14000)
+local piled = 0; for _ in io.popen('ls "' .. LEVEL_DIR .. '" 2>/dev/null'):lines() do piled = piled + 1 end
+check(piled <= 22, "game away, music started from the phone: the daemon stops writing chunks (" .. piled .. " waiting)")
+pause_game(false)
+s2, took = next_sound(s1, 8000)
+check(s2 and chunk_no(s2.parts[1]) <= 2 and gapless(s2), string.format("back in the game: a new stream plays %.1f s later", took))
+run(4000)
+s1 = newest(); at = heard_chunk(s1)
+for _, f in ipairs(cbs.main_menu_on_init) do f({}) end
+check(s1.stopped, "opening the main menu stops the sound")
+s2 = next_sound(s1, 3000)
+check(s2 and chunk_no(s2.parts[1]) - at <= 1, "and it picks up where it stopped")
+run(2000)
+EFF = 0; run(300)
+check(newest() == s2 and s2.stopped, "effects volume at zero: sound stopped by the script, not culled by the engine")
+EFF = 0.3
+s1 = next_sound(s2, 3000)
+check(s1, "volume back: playing again")
+run(12000)
+check(shipped.lag_ms() >= 4000 and shipped.lag_ms() <= 9000, "after all that about six seconds are held again: " .. shipped.lag_ms() .. " ms")
+check(CULLED == 0 and FREEZES == 0, "never a culled sound or a late attach (culled frames: " .. CULLED .. ", freezes: " .. FREEZES .. ")")
 shipped.set_mode("off"); run(3000)
 check(count_files() == 0, "no chunk files left behind, " .. count_files() .. " on disk")
+KEEP2 = nil; HEARD:close()
+
+-- the volume set in the PDA survives a level change (a new copy of the script)
+local again = fresh_copy()
+s1 = newest(); again.on_game_start()
+s2 = next_sound(s1, 8000)
+check(s2 and again.get_volume() == 90 and math.abs(s2.volume - 0.9) < 0.001, "the volume set in the PDA is kept across a level change: " .. tostring(again.get_volume()))
+again.set_mode("off"); run(3000)
+check(count_files() == 0 and FREEZES == 0, "clean at the end, " .. count_files() .. " files on disk")
 print("WORLD_PARTS " .. world_parts)
 
 -- paging with fake results
