@@ -330,15 +330,16 @@ public sealed class GameAudio
                 if (!_active) continue;
                 if (quiet && !_away)
                 {
-                    _awaySinceUtc = DateTime.UtcNow;
-                    _reported = false;
-                    _away = true;
+                    // Marked away only once the pause went through; a failed request is retried.
                     if ((await _spotify.GetStateAsync(ct)).Status == "playing")
                     {
                         Log.Info("Game audio: the game is not answering, pausing Spotify.");
-                        Interlocked.Exchange(ref _awayPaused, 1);
                         await _spotify.PauseAsync(ct);
+                        Interlocked.Exchange(ref _awayPaused, 1);
                     }
+                    _awaySinceUtc = DateTime.UtcNow;
+                    _reported = false;
+                    _away = true;
                 }
                 else if (!quiet && _away && _reported)
                 {
@@ -353,9 +354,10 @@ public sealed class GameAudio
                 }
             }
             catch (OperationCanceledException) { return; }
-            catch (Exception e) when (e is SpotifyException or HttpRequestException or InvalidOperationException)
+            catch (Exception e) when (e is SpotifyException or HttpRequestException or InvalidOperationException or TaskCanceledException && !ct.IsCancellationRequested)
             {
                 Log.Info("Game audio: " + e.Message);
+                try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { return; }
             }
         }
     }

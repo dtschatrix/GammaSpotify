@@ -49,25 +49,23 @@ cd daemon && dotnet build -c Release && cd ../test
 
 Runs twice (file link, socket link), about six minutes each; `MODES=file` or `MODES=socket` runs one. `exit=0` after each run means all checks passed. `FAKE_BLOCK=400` or `800` fixes the fake engine's buffer size instead of alternating.
 
-## Release zip
+## Release
+
+`tools/package.sh <version> <path to librespot.exe>` (Linux, needs `dotnet` and `zip`) builds two zips into `dist/`:
 
 ```
-Spotify-Radio-x.y/
-  README.md
-  LICENSE
-  mod/Spotify Radio/gamedata/...
-  daemon/SpotifyRadio.exe
-  daemon/run.bat
-  daemon/config.example.json
-  daemon/librespot/librespot.exe
-  daemon/librespot/LICENSE-librespot.txt
+Spotify-Radio-x.y-mod.zip          for MO2 "Install a new mod from archive"
+  gamedata/...
+
+Spotify-Radio-x.y-daemon.zip       unpacked anywhere outside MO2
+  Spotify-Radio-daemon/
+    SpotifyRadio.exe
+    run.bat                        starts the exe instead of dotnet run
+    config.example.json
+    librespot/librespot.exe
+    librespot/LICENSE-librespot.txt
+    README.md
+    LICENSE
 ```
 
-`run.bat` in the zip starts the exe instead of `dotnet run`:
-
-```
-@echo off
-cd /d "%~dp0"
-SpotifyRadio.exe
-pause
-```
+`gamedata` must be at the root of the mod zip. Otherwise MO2 installs it one folder too deep, flags the mod with a red X and the game never loads it.

@@ -241,8 +241,15 @@ local function check(cond, what) print((cond and "PASS " or "FAIL ") .. what); i
 check(pda.set_active_subdialog("eptTasks") == "vanilla:eptTasks", "other PDA tabs untouched")
 tab = pda.set_active_subdialog("eptRadio")
 check(type(tab) == "table" and tab == pda.set_active_subdialog("eptRadio"), "radio tab returns the Spotify window (singleton)")
+-- another PDA mod wraps the function after us and handles the radio tab itself
+local ours = pda.set_active_subdialog
+pda.set_active_subdialog = function(section) if section == "eptRadio" then return "other mod" end return ours(section) end
+check(pda.set_active_subdialog("eptRadio") == "other mod", "(another PDA mod takes the radio tab)")
+for _ = 1, 3 do for _, f in ipairs(cbs.actor_on_update) do f() end end
+check(pda.set_active_subdialog("eptRadio") == tab and pda.set_active_subdialog("eptTasks") == "vanilla:eptTasks", "the Spotify tab is put back on top; other tabs still go through both mods")
 check(cbs.on_key_press == nil or true, "loaded")
 run(700)
+for _, f in ipairs(cbs.actor_on_first_update or {}) do f() end   -- as on loading a save
 check(radio.is_connected(), "opening the tab connects via " .. radio.link_mode)
 check(radio.link_mode == (arg[2] or "file"), "link mode")
 print("   now: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText() .. " | " .. tab.list_title:GetText())
@@ -537,4 +544,6 @@ if radio.link_mode == "file" then
 	check(radio.is_connected() and tab.now_playing:GetText() ~= "Not connected", "daemon restart is picked up without replaying old clicks: " .. tab.now_playing:GetText())
 	check(not io.open("daemon3.log"):read("*a"):find("<- next"), "stale commands are not replayed")
 end
+local dlog = io.open("daemon_" .. (arg[2] or "file") .. ".log"):read("*a")
+check(dlog:find("game: PDA hook installed", 1, true) and dlog:find("game: radio tab opened", 1, true), "the daemon window says the PDA hook is in place")
 os.exit(fails)

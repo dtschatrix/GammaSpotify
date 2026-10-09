@@ -28,13 +28,14 @@ To do without it, delete `daemon\librespot\librespot.exe`. The PDA then only rem
 
 ## Install
 
-Download the zip from Releases and unpack it.
+A release has two zips.
 
-1. Copy `mod/Spotify Radio` into MO2's `mods` folder, press F5 in MO2 and enable it.
-2. At <https://developer.spotify.com/dashboard> create an app with redirect URI `http://127.0.0.1:47801/callback` and API "Web API". Copy its Client ID.
-3. Run `daemon/run.bat`. Enter the Client ID and the path of your Anomaly folder (the one containing `appdata`, not the GAMMA folder), then log in to Spotify in the browser, twice: once for the daemon and once for librespot. Windows may warn that the program is unsigned.
+1. **The mod:** in MO2, "Install a new mod from archive" (the CD icon) and pick `Spotify-Radio-x.y-mod.zip`. Enable it. If MO2 shows a red X next to the mod, its `gamedata` folder is not at the top of the mod folder.
+2. **The daemon:** unpack `Spotify-Radio-x.y-daemon.zip` anywhere outside MO2's folders, for example `C:\Games\Spotify-Radio-daemon`.
+3. At <https://developer.spotify.com/dashboard> create an app with redirect URI `http://127.0.0.1:47801/callback` and API "Web API". Copy its Client ID.
+4. Run `run.bat` in the daemon folder. Enter the Client ID and the path of your Anomaly folder (the one containing `appdata`, not the GAMMA folder), then log in to Spotify in the browser, twice: once for the daemon and once for librespot. Windows may warn that the program is unsigned.
 
-Keep the daemon running while you play.
+Keep the daemon running while you play. When a save is loaded the daemon window shows `game: PDA hook installed`; if it never does, see Troubleshooting.
 
 ## Use
 
@@ -102,6 +103,8 @@ Do not change `chunkMs`.
 
 ## Troubleshooting
 
+- **The PDA shows the old radio tab, and the daemon window never says "Game connected"**: the mod is not loaded. In MO2 a red X next to it means `gamedata` is not at the top of the mod folder: install the mod zip with "Install a new mod from archive", or move `gamedata` up by hand.
+- **The PDA shows the old radio tab, but the daemon says "Game connected"**: another PDA mod took the radio tab. The daemon window says which way (`PDA hook ...` lines). Open an issue with the name of that mod.
 - **"Not connected" or "Waiting for the daemon"**: the daemon is not running, or `ipcDir` is not the `appdata` of the game you are running. The daemon prints the folder it watches.
 - **No sound**: check the daemon window for an error, the SFX volume, and that Spotify shows "STALKER PDA" as the playing device. Opening the Radio tab asks for the stream again.
 - **"Spotify rejected the login"**: wrong Client ID or redirect URI. Delete `tokens.json` to log in again; delete `librespot-cache` to redo librespot's login.
@@ -114,7 +117,7 @@ The daemon runs librespot as a Spotify Connect device, cuts its audio into one-s
 ## Credits
 
 - The idea of making the game a Spotify Connect device is from [Spotify Radio for Forza Horizon](https://www.nexusmods.com/forzahorizon6/mods/95) by BigJohn ([source](https://github.com/matkhl/FH6-Spotify-Radio)). No code is shared.
-- [librespot](https://github.com/librespot-org/librespot) (MIT; licence in `daemon/librespot/`)
+- [librespot](https://github.com/librespot-org/librespot) (MIT; licence in the daemon's `librespot` folder)
 - [OggVorbisEncoder](https://github.com/SteveLillis/.NET-Ogg-Vorbis-Encoder) (MIT)
 - [xray-monolith](https://github.com/themrdemonized/xray-monolith), whose source shows how the sound engine behaves
 - Written with the help of [Claude](https://claude.ai), Anthropic's AI assistant

@@ -353,19 +353,69 @@ end
 -------------------------------------------------------------------
 -- Hook into the PDA
 -------------------------------------------------------------------
-local patched = false
+-- The radio tab is taken over by wrapping pda.set_active_subdialog. Another PDA mod may wrap or
+-- replace that function after us; then our wrapper is no longer the one the PDA calls. So it is
+-- checked every few seconds and, if needed, put back on top of whatever is there now.
+local HOOK_CHECK_MS = 3000
+local MAX_REHOOKS   = 5
 
-function on_game_start()
-	if not REPLACE_RADIO_TAB or patched then return end
-	patched = true
+local hook                     -- our current wrapper
+local rehooks = 0
+local next_check = 0
+local opened_once = false
 
+local function tell(msg)
+	printf("[spotify_radio_ui] %s", msg)
+	spotify_radio.tell("log " .. msg)
+end
+
+local function install_hook()
+	if not (pda and type(pda.set_active_subdialog) == "function") then return false end
 	local original = pda.set_active_subdialog
-	pda.set_active_subdialog = function(section)
+	hook = function(section)
 		if section == "eptRadio" then
+			if not opened_once then
+				opened_once = true
+				tell("radio tab opened: the Spotify screen is shown")
+			end
 			spotify_radio.on_tab_opened()
 			spotify_radio_stream.retry()
 			return get_ui()
 		end
 		return original(section)
 	end
+	pda.set_active_subdialog = hook
+	return true
+end
+
+local function check_hook()
+	local now = time_global()
+	if now < next_check then return end
+	next_check = now + HOOK_CHECK_MS
+	if not hook then
+		if install_hook() then tell("PDA hook installed late") end
+		return
+	end
+	if pda.set_active_subdialog == hook or rehooks >= MAX_REHOOKS then return end
+	rehooks = rehooks + 1
+	install_hook()
+	tell(rehooks < MAX_REHOOKS
+		and "another mod replaced the PDA tab function; the Spotify tab was put back on top"
+		or "another mod keeps replacing the PDA tab function; giving up, the Spotify tab may not show")
+end
+
+local function actor_on_first_update()
+	-- reported once per load, so the daemon window shows whether the tab can work at all
+	if not hook then
+		tell("PDA hook NOT installed: pda.set_active_subdialog is missing (a PDA mod replaced pda.script?)")
+	else
+		tell("PDA hook installed")
+	end
+end
+
+function on_game_start()
+	if not REPLACE_RADIO_TAB then return end
+	install_hook()
+	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+	RegisterScriptCallback("actor_on_update", check_hook)
 end

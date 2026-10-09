@@ -110,6 +110,40 @@ public sealed class GameServer
         _codec = codec;
     }
 
+    /// <summary>
+    /// The usual install mistake leaves the mod's scripts out of the game: the game runs, the
+    /// daemon never hears from it, and nothing says why. If Anomaly has been running for a while
+    /// without a word, say what to check. Once per game run. Scripts only start when a save is
+    /// loaded, so this can also mean the player is still in the main menu.
+    /// </summary>
+    private async Task WatchForSilentGameAsync(CancellationToken ct)
+    {
+        var hinted = false;
+        DateTime? runningSince = null;
+        while (!ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(15), ct); }
+            catch (OperationCanceledException) { return; }
+            bool running;
+            try
+            {
+                running = System.Diagnostics.Process.GetProcesses()
+                    .Any(p => p.ProcessName.StartsWith("AnomalyDX", StringComparison.OrdinalIgnoreCase));
+            }
+            catch (Exception) { continue; }
+            if (!running) { runningSince = null; hinted = false; continue; }
+            runningSince ??= DateTime.UtcNow;
+            var heardSinceStart = _lastHeardUtc > runningSince;
+            if (hinted || heardSinceStart || DateTime.UtcNow - runningSince < TimeSpan.FromMinutes(4)) continue;
+            hinted = true;
+            Log.Info("The game has been running for a few minutes and the mod has not said anything.");
+            Log.Info("  If you are already in game (not in the main menu), the mod is not loaded:");
+            Log.Info("  - in MO2, a red X next to the mod means its gamedata folder is not at the top of the mod;");
+            Log.Info("  - check that the mod is ticked in the profile you start the game with;");
+            Log.Info($"  - ipcDir in config.json must be the appdata folder of this game: {_cfg.IpcDir}");
+        }
+    }
+
     private IEnumerable<ILink> ActiveLinks()
     {
         foreach (var l in _tcpLinks.Values) yield return l;
@@ -119,6 +153,7 @@ public sealed class GameServer
     public async Task RunAsync(CancellationToken ct)
     {
         _ = Task.Run(() => PollLoopAsync(ct), ct);
+        _ = Task.Run(() => WatchForSilentGameAsync(ct), ct);
         if (!string.IsNullOrWhiteSpace(_cfg.IpcDir))
             _ = Task.Run(() => FileLoopAsync(_cfg.IpcDir, ct), ct);
         else
