@@ -1,0 +1,85 @@
+namespace SpotifyRadio;
+
+/// <summary>
+/// Where the audio comes from, as seen by the streamer (GameAudio). The source hands its PCM
+/// (44.1 kHz, 16-bit, stereo) to GameAudio.PumpAsync and is asked the things only it can know:
+/// how to take playback over when the game wants the stream, what a silence in the audio means,
+/// and which track a new stretch of audio belongs to.
+/// </summary>
+public interface IAudioSource
+{
+    /// <summary>Called once by the streamer, before anything else.</summary>
+    void Attach(GameAudio audio);
+
+    /// <summary>What the source needs to run is there.</summary>
+    bool Available { get; }
+
+    /// <summary>What is missing when it is not available, for the log.</summary>
+    string Missing { get; }
+
+    /// <summary>Runs for as long as the daemon does, feeding GameAudio.PumpAsync.</summary>
+    Task RunAsync(CancellationToken ct);
+
+    /// <summary>Stops whatever the source started; safe to call at any time.</summary>
+    void Kill();
+
+    // ------------------------------------------------------------------ the game asks for the stream
+
+    /// <summary>Throws a SpotifyException saying why audio cannot be handed over right now.</summary>
+    void EnsureReady();
+
+    /// <summary>
+    /// Before the stream is set up: anything that can still fail (throws SpotifyException).
+    /// What it returns is handed back to the two calls below and means nothing to the streamer.
+    /// </summary>
+    Task<object?> PrepareAsync(CancellationToken ct);
+
+    /// <summary>The stream has been set up. Called under the streamer's lock.</summary>
+    void OnStreamReset(object? prepared);
+
+    /// <summary>Start producing for the game. <paramref name="resume"/>: the source was paused because the game was away.</summary>
+    Task TakeOverAsync(object? prepared, bool resume, CancellationToken ct);
+
+    /// <summary>The game no longer wants the stream.</summary>
+    Task ReleaseAsync(CancellationToken ct);
+
+    // ------------------------------------------------------------------ while streaming
+
+    /// <summary>Everything the game held was dropped; what comes next is a new stretch of audio. Called under the streamer's lock.</summary>
+    void OnNewSegment();
+
+    /// <summary>The first audio of a segment went into chunk <paramref name="index"/>. Called under the streamer's lock.</summary>
+    void OnSegmentStarted(int index, CancellationToken ct);
+
+    /// <summary>No audio has come for a moment while the game is streaming.</summary>
+    Task OnStallAsync(CancellationToken ct);
+
+    /// <summary>Audio is coming again after a stall.</summary>
+    Task OnAudioBackAsync(CancellationToken ct);
+
+    /// <summary>The game stopped answering. True when something was playing and has been paused for that reason.</summary>
+    Task<bool> PauseForAwayAsync(CancellationToken ct);
+
+    /// <summary>The game is back and <see cref="PauseForAwayAsync"/> had paused the source.</summary>
+    Task ResumeAfterAwayAsync(CancellationToken ct);
+}
+
+/// <summary>What the PDA can ask of whatever is playing: the commands of the game link.</summary>
+public interface IPlayer
+{
+    Task<PlayerState> GetStateAsync(CancellationToken ct);
+
+    /// <summary>The regular poll. Same answer as <see cref="GetStateAsync"/>, but the player may act on what it sees.</summary>
+    Task<PlayerState> PollAsync(CancellationToken ct);
+
+    Task PlayAsync(CancellationToken ct);
+    Task PauseAsync(CancellationToken ct);
+    Task NextAsync(CancellationToken ct);
+    Task PreviousAsync(CancellationToken ct);
+    Task SetVolumeAsync(int percent, CancellationToken ct);
+    Task SetShuffleAsync(bool on, CancellationToken ct);
+    Task PlayUriAsync(string uri, CancellationToken ct);
+    Task QueueAsync(string uri, CancellationToken ct);
+    Task<List<SearchItem>> SearchAsync(string query, CancellationToken ct);
+    Task<List<SearchItem>> MyPlaylistsAsync(CancellationToken ct);
+}

@@ -14,7 +14,7 @@ Spotify <-- Web API --> daemon <-- two text files in appdata --> game scripts
 - `spotify_radio.script`: link to the daemon, player state.
 - `spotify_radio_ui.script`, `ui_spotify_radio.xml`: the PDA tab. Wraps `pda.set_active_subdialog` and returns its own window for the radio tab.
 - `spotify_radio_stream.script`: plays the chunks.
-- `daemon/`: Web API client (PKCE, no client secret), the game link, and `GameAudio.cs`, which runs librespot and cuts its output into chunks.
+- `daemon/`: Web API client (PKCE, no client secret), the game link (`GameServer.cs`), `SpotifySource.cs`, which runs librespot and follows what Spotify is doing, and `GameAudio.cs`, which cuts the audio it is handed into chunks and paces it for the game. The last two only meet through `IAudioSource.cs`.
 
 ## Game <-> daemon
 

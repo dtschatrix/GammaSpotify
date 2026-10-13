@@ -80,7 +80,7 @@ public sealed class GameServer
     private const long MaxFileBytes = 1024 * 1024;
 
     private readonly Config _cfg;
-    private readonly SpotifyClient _spotify;
+    private readonly IPlayer _player;
     private readonly TextCodec _codec;
     private readonly ConcurrentDictionary<int, TcpLink> _tcpLinks = new();
     private FileLink? _fileLink;
@@ -103,10 +103,10 @@ public sealed class GameServer
     private string _lastPollError = "";
     private int _nextId;
 
-    public GameServer(Config cfg, SpotifyClient spotify, TextCodec codec)
+    public GameServer(Config cfg, IPlayer player, TextCodec codec)
     {
         _cfg = cfg;
-        _spotify = spotify;
+        _player = player;
         _codec = codec;
     }
 
@@ -353,9 +353,9 @@ public sealed class GameServer
             try
             {
                 var parts = arg.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length == 3 && parts[0] == "start" && Audio is not { Installed: true })
+                if (parts.Length == 3 && parts[0] == "start" && Audio is not { Available: true })
                 {
-                    // no librespot: the game stays a remote control, without an error message
+                    // no audio source (librespot is missing): the game stays a remote control, without an error message
                     await SendAsync(link, ct, "stream", "unavailable");
                 }
                 else if (parts.Length == 3 && parts[0] == "start")
@@ -385,45 +385,44 @@ public sealed class GameServer
             {
                 case "hello":
                     await SendAsync(link, ct, "hello", "SpotifyRadio", "1");
-                    await SendStateAsync(link, await _spotify.GetStateAsync(ct), ct);
+                    await SendStateAsync(link, await _player.GetStateAsync(ct), ct);
                     return;
                 case "state":
-                    await SendStateAsync(link, await _spotify.GetStateAsync(ct), ct);
+                    await SendStateAsync(link, await _player.GetStateAsync(ct), ct);
                     return;
                 case "toggle":
-                    if ((await _spotify.GetStateAsync(ct)).Status == "playing") await _spotify.PauseAsync(ct);
-                    else await _spotify.PlayAsync(ct);
+                    if ((await _player.GetStateAsync(ct)).Status == "playing") await _player.PauseAsync(ct);
+                    else await _player.PlayAsync(ct);
                     break;
-                case "play": await _spotify.PlayAsync(ct); break;
-                case "pause": await _spotify.PauseAsync(ct); break;
-                case "next": Audio?.ExpectChange(); await _spotify.NextAsync(ct); break;
-                case "prev": Audio?.ExpectChange(); await _spotify.PreviousAsync(ct); break;
+                case "play": await _player.PlayAsync(ct); break;
+                case "pause": await _player.PauseAsync(ct); break;
+                case "next": await _player.NextAsync(ct); break;
+                case "prev": await _player.PreviousAsync(ct); break;
                 case "vol":
-                    await _spotify.SetVolumeAsync(ParseInt(arg), ct);
+                    await _player.SetVolumeAsync(ParseInt(arg), ct);
                     break;
                 case "volrel":
                 {
-                    var current = (await _spotify.GetStateAsync(ct)).Volume;
+                    var current = (await _player.GetStateAsync(ct)).Volume;
                     if (current < 0) throw new SpotifyException("No active Spotify device to set volume on");
-                    await _spotify.SetVolumeAsync(current + ParseInt(arg), ct);
+                    await _player.SetVolumeAsync(current + ParseInt(arg), ct);
                     break;
                 }
                 case "shuffle":
-                    await _spotify.SetShuffleAsync(arg is "on" or "1" or "true", ct);
+                    await _player.SetShuffleAsync(arg is "on" or "1" or "true", ct);
                     break;
                 case "playuri":
-                    Audio?.ExpectChange();
-                    await _spotify.PlayUriAsync(arg, ct);
+                    await _player.PlayUriAsync(arg, ct);
                     break;
                 case "queue":
-                    await _spotify.QueueAsync(arg, ct);
+                    await _player.QueueAsync(arg, ct);
                     break;
                 case "search":
                     if (arg.Length == 0) throw new SpotifyException("Empty search");
-                    await SendResultsAsync(link, arg, await _spotify.SearchAsync(arg, ct), ct);
+                    await SendResultsAsync(link, arg, await _player.SearchAsync(arg, ct), ct);
                     return;
                 case "playlists":
-                    await SendResultsAsync(link, "playlists", await _spotify.MyPlaylistsAsync(ct), ct);
+                    await SendResultsAsync(link, "playlists", await _player.MyPlaylistsAsync(ct), ct);
                     return;
                 default:
                     throw new SpotifyException("Unknown command: " + cmd);
@@ -497,8 +496,7 @@ public sealed class GameServer
 
     private async Task PollOnceAsync(bool force, CancellationToken ct)
     {
-        var state = await _spotify.GetStateAsync(ct);
-        if (Audio is not null) await Audio.OnPolledStateAsync(state, ct);
+        var state = await _player.PollAsync(ct);
         if (!force && state.Signature == _lastSignature) return;
         _lastSignature = state.Signature;
         foreach (var link in ActiveLinks().ToList())
