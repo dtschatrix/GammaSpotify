@@ -1,13 +1,19 @@
 namespace SpotifyRadio;
 
 /// <summary>
-/// Where the audio comes from, as seen by the streamer (GameAudio). The source hands its PCM
+/// Where the audio comes from, as seen by the streamer (GameAudio). A source hands its PCM
 /// (44.1 kHz, 16-bit, stereo) to GameAudio.PumpAsync and is asked the things only it can know:
 /// how to take playback over when the game wants the stream, what a silence in the audio means,
 /// and which track a new stretch of audio belongs to.
+///
+/// Several sources can run at once (Spotify and YouTube); one of them is current. Only the
+/// current source's audio reaches the game, and only it gets the calls marked "current only".
 /// </summary>
 public interface IAudioSource
 {
+    /// <summary>For the log: "Spotify", "YouTube".</summary>
+    string Name { get; }
+
     /// <summary>Called once by the streamer, before anything else.</summary>
     void Attach(GameAudio audio);
 
@@ -23,7 +29,7 @@ public interface IAudioSource
     /// <summary>Stops whatever the source started; safe to call at any time.</summary>
     void Kill();
 
-    // ------------------------------------------------------------------ the game asks for the stream
+    // ------------------------------------------------------------------ the game asks for the stream (current only)
 
     /// <summary>Throws a SpotifyException saying why audio cannot be handed over right now.</summary>
     void EnsureReady();
@@ -40,16 +46,23 @@ public interface IAudioSource
     /// <summary>Start producing for the game. <paramref name="resume"/>: the source was paused because the game was away.</summary>
     Task TakeOverAsync(object? prepared, bool resume, CancellationToken ct);
 
-    /// <summary>The game no longer wants the stream.</summary>
+    /// <summary>The game no longer wants the stream. Called for every source.</summary>
     Task ReleaseAsync(CancellationToken ct);
 
-    // ------------------------------------------------------------------ while streaming
+    /// <summary>Another source has become the current one: stop producing audio.</summary>
+    Task DeactivateAsync(CancellationToken ct);
+
+    // ------------------------------------------------------------------ while streaming (current only)
 
     /// <summary>Everything the game held was dropped; what comes next is a new stretch of audio. Called under the streamer's lock.</summary>
     void OnNewSegment();
 
-    /// <summary>The first audio of a segment went into chunk <paramref name="index"/>. Called under the streamer's lock.</summary>
-    void OnSegmentStarted(int index, CancellationToken ct);
+    /// <summary>
+    /// The first audio of a segment went into chunk <paramref name="index"/>. Called under the
+    /// streamer's lock; GameAudio.SegmentStartSourceByte says where in the source's own output
+    /// that audio was.
+    /// </summary>
+    Task OnSegmentStartedAsync(int index, CancellationToken ct);
 
     /// <summary>No audio has come for a moment while the game is streaming.</summary>
     Task OnStallAsync(CancellationToken ct);

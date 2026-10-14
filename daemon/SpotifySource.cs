@@ -35,7 +35,12 @@ public sealed class SpotifySource : IAudioSource, IPlayer
         _spotify = spotify;
     }
 
+    public string Name => "Spotify";
+
     public void Attach(GameAudio audio) => _audio = audio;
+
+    /// <summary>Spotify is the source the game hears (YouTube may be instead).</summary>
+    private bool IsCurrent => _audio is { } a && a.IsCurrent(this);
 
     private GameAudio Audio => _audio ?? throw new InvalidOperationException("the audio source is not attached to the game audio");
 
@@ -129,7 +134,7 @@ public sealed class SpotifySource : IAudioSource, IPlayer
         Log.Info($"Game audio: ready, Spotify device \"{_cfg.StreamDeviceName}\".");
         try
         {
-            await Audio.PumpAsync(process.StandardOutput.BaseStream, ct);
+            await Audio.PumpAsync(this, process.StandardOutput.BaseStream, ct);
         }
         finally
         {
@@ -249,6 +254,38 @@ public sealed class SpotifySource : IAudioSource, IPlayer
         }
     }
 
+    /// <summary>YouTube is playing now: Spotify is paused, and librespot's audio is read and dropped.</summary>
+    public async Task DeactivateAsync(CancellationToken ct)
+    {
+        if ((await _spotify.GetStateAsync(ct)).Status != "playing") return;
+        Log.Info("Game audio: pausing Spotify.");
+        await _spotify.PauseAsync(ct);
+    }
+
+    /// <summary>
+    /// Something is asked of Spotify while another source plays: Spotify becomes the source the
+    /// game hears again, with playback on the game's device. True when it was not current before.
+    /// </summary>
+    private async Task<bool> BecomeCurrentAsync(CancellationToken ct)
+    {
+        if (_audio is not { } audio || audio.IsCurrent(this)) return false;
+        if (!audio.Streaming)
+        {
+            await audio.StartOverAsync(this, "back to Spotify", 0, ct);
+            return true;
+        }
+        EnsureReady();
+        var prepared = await PrepareAsync(ct);
+        await audio.StartOverAsync(this, "back to Spotify", 0, ct);
+        using (await audio.LockAsync(ct))
+        {
+            _lastState = null;
+            if (_previousDeviceId is null && prepared is Takeover { Previous: { } previous }) _previousDeviceId = previous.Id;
+        }
+        await TakeOverAsync(prepared, resume: false, ct);
+        return true;
+    }
+
     // ------------------------------------------------------------------ the game going away
 
     public async Task<bool> PauseForAwayAsync(CancellationToken ct)
@@ -324,7 +361,7 @@ public sealed class SpotifySource : IAudioSource, IPlayer
     /// <summary>Called with every state the daemon polls, and when the audio stops.</summary>
     private async Task OnPolledStateAsync(PlayerState state, CancellationToken ct)
     {
-        if (_audio is { Streaming: true, Draining: false }) await ReactAsync(state, ct);
+        if (IsCurrent && _audio is { Streaming: true, Draining: false }) await ReactAsync(state, ct);
         else Remember(state);
     }
 
@@ -332,7 +369,11 @@ public sealed class SpotifySource : IAudioSource, IPlayer
     {
         // one at a time: the poll, a gap in the audio and a new segment can all ask at once
         await _reactGate.WaitAsync(ct);
-        try { await ReactOnceAsync(state, ct); }
+        try
+        {
+            if (IsCurrent) await ReactOnceAsync(state, ct);
+            else Remember(state);                // another source plays: nothing Spotify does is heard
+        }
         finally { _reactGate.Release(); }
     }
 
@@ -409,8 +450,11 @@ public sealed class SpotifySource : IAudioSource, IPlayer
     }
 
     /// <summary>Asks Spotify what a new segment is, shortly after its first audio.</summary>
-    public void OnSegmentStarted(int index, CancellationToken ct) =>
+    public Task OnSegmentStartedAsync(int index, CancellationToken ct)
+    {
         _ = Task.Run(() => ResolveMarkAsync(index, ct), CancellationToken.None);
+        return Task.CompletedTask;
+    }
 
     /// <summary>After a start or a flush: the first audio of the segment was read when playback (re)started.</summary>
     private async Task MarkSegmentAsync(PlayerState state, CancellationToken ct)
@@ -420,7 +464,7 @@ public sealed class SpotifySource : IAudioSource, IPlayer
         double pos;
         using (await audio.LockAsync(ct))
         {
-            if (!audio.Streaming || !_needMark || audio.SegmentStartUtc == DateTime.MinValue || state.Status != "playing" || state.Uri.Length == 0) return;
+            if (!audio.Streaming || !audio.IsCurrent(this) || !_needMark || audio.SegmentStartUtc == DateTime.MinValue || state.Status != "playing" || state.Uri.Length == 0) return;
             _needMark = false;
             _markUri = state.Uri;
             index = audio.SegmentStartIndex;
@@ -437,7 +481,7 @@ public sealed class SpotifySource : IAudioSource, IPlayer
         double pos;
         using (await audio.LockAsync(ct))
         {
-            if (!audio.Streaming) return;
+            if (!audio.Streaming || !audio.IsCurrent(this)) return;
             (index, pos) = audio.ChunkReadFrom(DateTime.UtcNow.AddMilliseconds(-state.ProgressMs));
             _markUri = state.Uri;
         }
@@ -489,10 +533,13 @@ public sealed class SpotifySource : IAudioSource, IPlayer
     public Task SetVolumeAsync(int percent, CancellationToken ct) => _spotify.SetVolumeAsync(percent, ct);
     public Task SetShuffleAsync(bool on, CancellationToken ct) => _spotify.SetShuffleAsync(on, ct);
 
-    public Task PlayUriAsync(string uri, CancellationToken ct)
+    /// <summary>The PDA asked for a Spotify track or list: Spotify becomes what the game hears, if it was not.</summary>
+    public async Task PlayUriAsync(string uri, CancellationToken ct)
     {
-        ExpectChange();
-        return _spotify.PlayUriAsync(uri, ct);
+        // Spotify was paused while the other source played, so no old audio is on its way:
+        // nothing to wait out, and its pause would not even show as a gap.
+        if (!await BecomeCurrentAsync(ct)) ExpectChange();
+        await _spotify.PlayUriAsync(uri, ct);
     }
 
     public Task QueueAsync(string uri, CancellationToken ct) => _spotify.QueueAsync(uri, ct);

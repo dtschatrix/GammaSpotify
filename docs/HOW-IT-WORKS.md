@@ -8,13 +8,15 @@ Engine behaviour described here comes from the [xray-monolith](https://github.co
 Spotify <-- Web API --> daemon <-- two text files in appdata --> game scripts
                           |
                           +-- librespot (child process, raw PCM on stdout)
+                          +-- yt-dlp (child process from yt\, finds a track's audio stream)
+                          +-- ffmpeg (child process from yt\, decodes it to raw PCM on stdout)
                           +-- one-second .ogg files -> gamedata\levels\<level>\
 ```
 
 - `spotify_radio.script`: link to the daemon, player state.
 - `spotify_radio_ui.script`, `ui_spotify_radio.xml`: the PDA tab. Wraps `pda.set_active_subdialog` and returns its own window for the radio tab.
 - `spotify_radio_stream.script`: plays the chunks.
-- `daemon/`: Web API client (PKCE, no client secret), the game link (`GameServer.cs`), `SpotifySource.cs`, which runs librespot and follows what Spotify is doing, and `GameAudio.cs`, which cuts the audio it is handed into chunks and paces it for the game. The last two only meet through `IAudioSource.cs`.
+- `daemon/`: Web API client (PKCE, no client secret), the game link (`GameServer.cs`), `SpotifySource.cs`, which runs librespot and follows what Spotify is doing, `YouTubeSource.cs`, which runs yt-dlp and ffmpeg and keeps its own queue, and `GameAudio.cs`, which cuts the audio it is handed into chunks and paces it for the game. `GameAudio.cs` takes several sources through `IAudioSource.cs`; one of them is current.
 
 ## Game <-> daemon
 
@@ -86,6 +88,26 @@ Scripts do not run while the game is paused, in the main menu or loading. When t
 
 Without `librespot.exe` the daemon answers `stream unavailable` and the mod is a remote control for the Spotify app.
 
+## YouTube
+
+Until the PDA has a source switch, a search that starts with `yt ` goes to YouTube Music. Results are songs, albums and playlists (URIs `yt:video:<id>`, `yt:album:<browseId>`, `yt:playlist:<id>`). Playing one makes YouTube the source the game hears; playing a Spotify result makes Spotify the source again. The transport buttons (play, pause, next, previous, shuffle) act on whichever source is current. The mod scripts need nothing for this; the daemon decides by the `yt ` prefix.
+
+Search is a direct request to YouTube Music's own search endpoint (`music.youtube.com/youtubei/v1/search`, client `WEB_REMIX`), because yt-dlp's search returns titles without artist or length.
+
+yt-dlp looks up a track's stream, asking only the `visionos` YouTube client first and using yt-dlp's defaults as fallback. ffmpeg decodes the stream to 44.1 kHz 16-bit stereo, the same PCM librespot gives. One ffmpeg runs per track.
+
+Nothing outside runs the queue, so the daemon is the player: a list, next / previous, shuffle, and queued tracks that play after the current one. When the list runs out, the daemon adds YouTube's mix of the last track (the `RD<videoId>` list, which YouTube Music plays as a radio), leaving out what was already played, and plays on without a break: the game still holds several seconds of audio while the next stream is looked up.
+
+While paused, ffmpeg's output is not read. If a stream ends early (the connection dropped after a long pause, or the address was refused; a 403 on a fresh address happens), ffmpeg is started again at that position, with a fresh lookup when no audio came at all. The position is given with `-ss` after `-i`; before `-i` the Windows ffmpeg build gets HTTP 400 from YouTube.
+
+Track marks are exact: the daemon decodes the audio itself, so it knows at which byte of its output each track starts. When the player changes track, everything YouTube handed out before that byte is dropped, even if it is still on its way to the chunker.
+
+YouTube answers "confirm you're not a bot" (or 429) after about 20-25 lookups in a few minutes from one address. Only the current track and the next one are looked up, addresses are kept until they expire (about six hours), and that answer stops all lookups for ten minutes instead of being retried.
+
+Switching source drops what the game holds. Spotify is paused while YouTube plays; librespot's output is still read at real time and dropped.
+
+It needs `yt\yt-dlp.exe` (or the unpacked release in `yt\yt-dlp_win\`, which starts about half a second faster per lookup) and `yt\ffmpeg.exe` next to `run.bat`. Without them the daemon logs "no YouTube" and everything else works as before.
+
 ## Stopping instead of resuming
 
 When the engine stops rendering a chained sound and resumes it (pause, culling, its channel taken by another sound), it rewinds to the heard position, which is usually in a file it has already released, and plays about a second of wrong audio. The script therefore:
@@ -114,3 +136,5 @@ Chunks are encoded with the `OggVorbisEncoder` NuGet package. Checked by decodin
 ## Tests
 
 `test/run_tests.sh` runs the daemon against `mock_spotify.py` (fake Web API) and `fake_librespot.py`, and runs the game scripts under LuaJIT in `harness_ui.lua`. The mock keeps a position the way Spotify does; the fake librespot follows its play / pause / track state, leaves a gap when a track loads, and plays track N at position P from a known place in the test audio. The harness fakes the UI, the file index, and the sound streamer: three buffers of 400 or 800 ms, the two-tail limit, and a counter for attaches made after the data ran out, which must be zero. `audio_check.py` decodes the chunks the fake engine received and compares them with the source. `heard_check.py` compares the track and time the PDA showed with the audio the fake engine was playing at that moment. The harness enables world mode for part of its run, then loads unmodified copies of the stream script to check what ships. `QUICK=1` skips the world-mode part.
+
+The YouTube part uses `fake_ytdlp.sh` in place of yt-dlp and the real ffmpeg, decoding WAVs cut from the test audio. `fake_ytdlp.sh` answers after 1.2 s like a real lookup; some ids fail or give a refused address on purpose. The mock server also answers YouTube Music's search.

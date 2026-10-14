@@ -10,3 +10,4 @@ bin/
 obj/
 *.log
 test_audio.raw
+test/yt_*.wav

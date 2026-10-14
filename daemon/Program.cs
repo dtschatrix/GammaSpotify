@@ -68,9 +68,10 @@ try
         "idle" => $"Spotify: device \"{state.Device}\", nothing queued.",
         _ => $"Spotify: {state.Status} on \"{state.Device}\": {state.Artist} - {state.Title}",
     });
-    var source = new SpotifySource(cfg, spotify);
-    var server = new GameServer(cfg, source, new TextCodec(cfg.Encoding));
-    var audio = new GameAudio(cfg, source, server.BroadcastAsync, () => server.GameQuiet);
+    var spotifySource = new SpotifySource(cfg, spotify);
+    var youtube = new YouTubeSource(cfg, http);
+    var server = new GameServer(cfg, spotifySource, youtube, new TextCodec(cfg.Encoding));
+    var audio = new GameAudio(cfg, new IAudioSource[] { spotifySource, youtube }, server.BroadcastAsync, () => server.GameQuiet);
     server.Audio = audio;
     AppDomain.CurrentDomain.ProcessExit += (_, _) => audio.Kill(); // never leave librespot running on its own
     var audioTask = Task.Run(() => audio.RunAsync(cts.Token));

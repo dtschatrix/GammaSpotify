@@ -80,7 +80,8 @@ public sealed class GameServer
     private const long MaxFileBytes = 1024 * 1024;
 
     private readonly Config _cfg;
-    private readonly IPlayer _player;
+    private readonly IPlayer _spotify;
+    private readonly IPlayer _youtube;
     private readonly TextCodec _codec;
     private readonly ConcurrentDictionary<int, TcpLink> _tcpLinks = new();
     private FileLink? _fileLink;
@@ -88,6 +89,12 @@ public sealed class GameServer
 
     /// <summary>Set by Program once both objects exist.</summary>
     public GameAudio? Audio { get; set; }
+
+    /// <summary>What the transport buttons control: the source the game hears.</summary>
+    private IPlayer Player => Audio?.Current as IPlayer ?? _spotify;
+
+    /// <summary>Who plays or queues an address: YouTube's start with "yt:".</summary>
+    private IPlayer PlayerFor(string uri) => YouTubeSource.IsUri(uri) ? _youtube : _spotify;
 
     private DateTime _lastHeardUtc = DateTime.MinValue;
 
@@ -103,10 +110,11 @@ public sealed class GameServer
     private string _lastPollError = "";
     private int _nextId;
 
-    public GameServer(Config cfg, IPlayer player, TextCodec codec)
+    public GameServer(Config cfg, IPlayer spotify, IPlayer youtube, TextCodec codec)
     {
         _cfg = cfg;
-        _player = player;
+        _spotify = spotify;
+        _youtube = youtube;
         _codec = codec;
     }
 
@@ -385,44 +393,48 @@ public sealed class GameServer
             {
                 case "hello":
                     await SendAsync(link, ct, "hello", "SpotifyRadio", "1");
-                    await SendStateAsync(link, await _player.GetStateAsync(ct), ct);
+                    await SendStateAsync(link, await Player.GetStateAsync(ct), ct);
                     return;
                 case "state":
-                    await SendStateAsync(link, await _player.GetStateAsync(ct), ct);
+                    await SendStateAsync(link, await Player.GetStateAsync(ct), ct);
                     return;
                 case "toggle":
-                    if ((await _player.GetStateAsync(ct)).Status == "playing") await _player.PauseAsync(ct);
-                    else await _player.PlayAsync(ct);
+                    if ((await Player.GetStateAsync(ct)).Status == "playing") await Player.PauseAsync(ct);
+                    else await Player.PlayAsync(ct);
                     break;
-                case "play": await _player.PlayAsync(ct); break;
-                case "pause": await _player.PauseAsync(ct); break;
-                case "next": await _player.NextAsync(ct); break;
-                case "prev": await _player.PreviousAsync(ct); break;
+                case "play": await Player.PlayAsync(ct); break;
+                case "pause": await Player.PauseAsync(ct); break;
+                case "next": await Player.NextAsync(ct); break;
+                case "prev": await Player.PreviousAsync(ct); break;
                 case "vol":
-                    await _player.SetVolumeAsync(ParseInt(arg), ct);
+                    await Player.SetVolumeAsync(ParseInt(arg), ct);
                     break;
                 case "volrel":
                 {
-                    var current = (await _player.GetStateAsync(ct)).Volume;
+                    var current = (await Player.GetStateAsync(ct)).Volume;
                     if (current < 0) throw new SpotifyException("No active Spotify device to set volume on");
-                    await _player.SetVolumeAsync(current + ParseInt(arg), ct);
+                    await Player.SetVolumeAsync(current + ParseInt(arg), ct);
                     break;
                 }
                 case "shuffle":
-                    await _player.SetShuffleAsync(arg is "on" or "1" or "true", ct);
+                    await Player.SetShuffleAsync(arg is "on" or "1" or "true", ct);
                     break;
                 case "playuri":
-                    await _player.PlayUriAsync(arg, ct);
+                    await PlayerFor(arg).PlayUriAsync(arg, ct);
                     break;
                 case "queue":
-                    await _player.QueueAsync(arg, ct);
+                    await PlayerFor(arg).QueueAsync(arg, ct);
                     break;
+                case "search" when arg.StartsWith("yt ", StringComparison.OrdinalIgnoreCase):
+                    // until the PDA has a source switch: "yt ..." searches YouTube Music
+                    await SendResultsAsync(link, arg, await _youtube.SearchAsync(arg[3..].Trim(), ct), ct);
+                    return;
                 case "search":
                     if (arg.Length == 0) throw new SpotifyException("Empty search");
-                    await SendResultsAsync(link, arg, await _player.SearchAsync(arg, ct), ct);
+                    await SendResultsAsync(link, arg, await _spotify.SearchAsync(arg, ct), ct);
                     return;
                 case "playlists":
-                    await SendResultsAsync(link, "playlists", await _player.MyPlaylistsAsync(ct), ct);
+                    await SendResultsAsync(link, "playlists", await _spotify.MyPlaylistsAsync(ct), ct);
                     return;
                 default:
                     throw new SpotifyException("Unknown command: " + cmd);
@@ -496,7 +508,7 @@ public sealed class GameServer
 
     private async Task PollOnceAsync(bool force, CancellationToken ct)
     {
-        var state = await _player.PollAsync(ct);
+        var state = await Player.PollAsync(ct);
         if (!force && state.Signature == _lastSignature) return;
         _lastSignature = state.Signature;
         foreach (var link in ActiveLinks().ToList())

@@ -38,16 +38,22 @@ cargo install librespot --version 0.8.0 --locked --no-default-features --feature
 
 Copy the result to `daemon\librespot\librespot.exe`, or set `librespotPath` in `config.json`.
 
+## YouTube tools
+
+The YouTube source is not released yet. To try it, put either the unpacked yt-dlp Windows release (`yt-dlp_win.zip` from github.com/yt-dlp/yt-dlp/releases, unzipped into `daemon\yt\yt-dlp_win\`) or the single `yt-dlp.exe` into `daemon\yt\`. Put an LGPL ffmpeg build there as `daemon\yt\ffmpeg.exe`, for example BtbN's `ffmpeg-n8.1-latest-win64-lgpl` from github.com/BtbN/FFmpeg-Builds (its `bin\ffmpeg.exe`), and keep its licence text.
+
+How these ship in a release is not decided.
+
 ## Tests
 
-Linux only.
+Linux only. The YouTube part needs `ffmpeg` on the PATH.
 
 ```
 cd daemon && dotnet build -c Release && cd ../test
 ./run_tests.sh
 ```
 
-Runs twice (file link, socket link), about six minutes each; `MODES=file` or `MODES=socket` runs one. `exit=0` after each run means all checks passed. `FAKE_BLOCK=400` or `800` fixes the fake engine's buffer size instead of alternating.
+Runs twice (file link, socket link), about seven minutes each; `MODES=file` or `MODES=socket` runs one. `exit=0` after each run means all checks passed. `FAKE_BLOCK=400` or `800` fixes the fake engine's buffer size instead of alternating.
 
 ## Release
 

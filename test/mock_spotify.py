@@ -59,6 +59,20 @@ class H(BaseHTTPRequestHandler):
         if p == "/_do":       # something done in another Spotify app
             do_act(q["act"][0], q.get("ms", [None])[0]); return self._send(200, {})
         if p == "/_query": return self._send(200, {"q": S.get("last_query")})
+        if p == "/youtubei/v1/search":   # YouTube Music's search, answered per filter (songs, albums, playlists)
+            req = json.loads(body or "{}"); S["yt_query"] = req.get("query")
+            col = lambda t: {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": t}]}}}
+            def song(vid, title, sub): return {"musicResponsiveListItemRenderer": {"flexColumns": [col(title), col(sub)], "playlistItemData": {"videoId": vid}}}
+            def browse(bid, title, sub): return {"musicResponsiveListItemRenderer": {"flexColumns": [col(title), col(sub)],
+                                                 "navigationEndpoint": {"browseEndpoint": {"browseId": bid}}}}
+            f = req.get("params", "")
+            rows = ([song("vid00000001", "Creep", "Radiohead \u2022 Pablo Honey \u2022 3:59"),
+                     song("vid00000002", "Karma Police", "Radiohead \u2022 OK Computer \u2022 4:21"),
+                     song("failfailfai", "Broken", "Nobody \u2022 1:00")] if f.startswith("EgWKAQII") else
+                    [browse("MPREb_fake1", "OK Computer", "Album \u2022 Radiohead \u2022 1997")] if f.startswith("EgWKAQIY") else
+                    [browse("VLPLfake1", "Fake Mix", "someone \u2022 12 views")])
+            return self._send(200, {"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {
+                "contents": [{"musicShelfRenderer": {"contents": rows}}]}}}}]}}})
         if not self._auth(): return
         if p == "/v1/me/player" and method == "GET":
             if not S["active"]: return self._send(204)
@@ -110,4 +124,6 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self): self.handle_any("POST")
 
 from http.server import ThreadingHTTPServer
+ThreadingHTTPServer.request_queue_size = 128   # the daemon sends several requests at once (YouTube Music search)
+ThreadingHTTPServer.daemon_threads = True
 ThreadingHTTPServer(("127.0.0.1", 47900), H).serve_forever()
