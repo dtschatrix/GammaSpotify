@@ -1,4 +1,5 @@
 {
+  "sources": ["spotify", "youtube"],
   "clientId": "PASTE-YOUR-SPOTIFY-CLIENT-ID",
   "ipcDir": "D:\\Games\\Anomaly\\appdata",
   "preferredDevice": "",

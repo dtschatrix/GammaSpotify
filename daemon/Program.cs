@@ -1,5 +1,9 @@
 using SpotifyRadio;
 
+// --install-youtube: download yt-dlp and ffmpeg if missing; --update-youtube: a new yt-dlp (YouTube breaks old ones)
+if (args.Length > 0 && args[0] is "--install-youtube" or "--update-youtube")
+    return await YouTubeTools.CommandAsync(update: args[0] == "--update-youtube");
+
 Console.Title = "Spotify Radio daemon";
 using var single = new Mutex(true, "SpotifyRadioDaemon", out var first);
 if (!first)
@@ -9,10 +13,54 @@ if (!first)
 }
 var cfg = Config.Load();
 
-if (string.IsNullOrWhiteSpace(cfg.ClientId))
+using var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+if (cfg.Sources is null)
+{
+    // first run, or a config from before YouTube: an existing Spotify setup is the default
+    var hadSpotify = !string.IsNullOrWhiteSpace(cfg.ClientId);
+    Console.WriteLine("""
+
+        What should play in the game?
+          1  Spotify        needs Spotify Premium
+          2  YouTube Music  free; downloads two programs (yt-dlp, ffmpeg)
+          3  both
+
+        """);
+    while (cfg.Sources is null)
+    {
+        Console.Write(hadSpotify ? "Choice [1]: " : "Choice: ");
+        var typed = Console.ReadLine();
+        if (typed is null)
+        {
+            if (!hadSpotify) { Console.WriteLine("Nothing chosen, exiting."); return 1; }
+            typed = "1";
+        }
+        typed = typed.Trim();
+        if (typed.Length == 0 && hadSpotify) typed = "1";
+        cfg.Sources = typed switch
+        {
+            "1" => new[] { "spotify" },
+            "2" => new[] { "youtube" },
+            "3" => new[] { "spotify", "youtube" },
+            _ => null,
+        };
+        if (cfg.Sources is null) Console.WriteLine("  Type 1, 2 or 3.");
+    }
+    cfg.Save();
+}
+if (!cfg.Wants("spotify") && !cfg.Wants("youtube"))
+{
+    Console.WriteLine($"\"sources\" in {Config.ConfigPath} names neither spotify nor youtube. Remove it to choose again.");
+    return 1;
+}
+
+if (cfg.Wants("spotify") && string.IsNullOrWhiteSpace(cfg.ClientId))
 {
     Console.WriteLine("""
-        First run - Spotify needs an app registration (free, takes a minute):
+
+        Spotify needs an app registration (free, takes a minute):
 
           1. Open https://developer.spotify.com/dashboard and create an app.
           2. Redirect URI:  %REDIRECT%
@@ -27,6 +75,15 @@ if (string.IsNullOrWhiteSpace(cfg.ClientId))
         Console.WriteLine("No Client ID given, exiting.");
         return 1;
     }
+}
+if (cfg.Wants("youtube") && !YouTubeTools.Installed && !await YouTubeTools.OfferAsync(cts.Token))
+{
+    if (!cfg.Wants("spotify"))
+    {
+        Console.WriteLine("Without yt-dlp and ffmpeg there is nothing to play. Start again to download them.");
+        return 1;
+    }
+    Log.Info("YouTube: off for now. Start again to download yt-dlp and ffmpeg, or run the daemon with --install-youtube.");
 }
 if (string.IsNullOrWhiteSpace(cfg.IpcDir))
 {
@@ -51,29 +108,34 @@ if (string.IsNullOrWhiteSpace(cfg.IpcDir))
 cfg.Save();
 Log.Info($"Config: {Config.ConfigPath}");
 
-using var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-
 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-var auth = new SpotifyAuth(cfg, http);
-var spotify = new SpotifyClient(cfg, auth, http);
 
 try
 {
-    await auth.EnsureLoggedInAsync(cts.Token);
-    var state = await spotify.GetStateAsync(cts.Token);
-    Log.Info(state.Status switch
+    SpotifySource? spotifySource = null;
+    if (cfg.Wants("spotify"))
     {
-        "nodevice" => "Spotify: no active device right now.",
-        "idle" => $"Spotify: device \"{state.Device}\", nothing queued.",
-        _ => $"Spotify: {state.Status} on \"{state.Device}\": {state.Artist} - {state.Title}",
-    });
-    var spotifySource = new SpotifySource(cfg, spotify);
-    var youtube = new YouTubeSource(cfg, http);
+        var auth = new SpotifyAuth(cfg, http);
+        var spotify = new SpotifyClient(cfg, auth, http);
+        await auth.EnsureLoggedInAsync(cts.Token);
+        var state = await spotify.GetStateAsync(cts.Token);
+        Log.Info(state.Status switch
+        {
+            "nodevice" => "Spotify: no active device right now.",
+            "idle" => $"Spotify: device \"{state.Device}\", nothing queued.",
+            _ => $"Spotify: {state.Status} on \"{state.Device}\": {state.Artist} - {state.Title}",
+        });
+        spotifySource = new SpotifySource(cfg, spotify);
+    }
+    var youtube = cfg.Wants("youtube") ? new YouTubeSource(cfg, http) : null;
+
+    var sources = new List<IAudioSource>();
+    if (spotifySource is not null) sources.Add(spotifySource);
+    if (youtube is not null) sources.Add(youtube);
     var server = new GameServer(cfg, spotifySource, youtube, new TextCodec(cfg.Encoding));
-    var audio = new GameAudio(cfg, new IAudioSource[] { spotifySource, youtube }, server.BroadcastAsync, () => server.GameQuiet);
+    var audio = new GameAudio(cfg, sources, server.BroadcastAsync, () => server.GameQuiet);
     server.Audio = audio;
-    AppDomain.CurrentDomain.ProcessExit += (_, _) => audio.Kill(); // never leave librespot running on its own
+    AppDomain.CurrentDomain.ProcessExit += (_, _) => audio.Kill(); // never leave librespot or ffmpeg running on their own
     var audioTask = Task.Run(() => audio.RunAsync(cts.Token));
     try { await server.RunAsync(cts.Token); }
     finally { audio.Kill(); }

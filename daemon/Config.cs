@@ -4,7 +4,9 @@ namespace SpotifyRadio;
 
 public sealed class Config
 {
-    /// <summary>Client ID of your app at developer.spotify.com/dashboard.</summary>
+    /// <summary>What plays in the game: "spotify", "youtube" or both. Asked on the first run; remove it to be asked again.</summary>
+    public string[]? Sources { get; set; }
+    /// <summary>Client ID of your app at developer.spotify.com/dashboard (Spotify only).</summary>
     public string ClientId { get; set; } = "";
     /// <summary>Port the game connects to (must match PORT in spotify_radio.script).</summary>
     public int GamePort { get; set; } = 47800;
@@ -90,6 +92,8 @@ public sealed class Config
         var root = Directory.GetParent(IpcDir.TrimEnd('\\', '/'))?.FullName;
         return root is null ? null : Path.Combine(root, "gamedata");
     }
+
+    public bool Wants(string source) => Sources?.Contains(source, StringComparer.OrdinalIgnoreCase) == true;
 
     public static Config Load()
     {

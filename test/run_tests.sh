@@ -11,7 +11,7 @@ DLL=../daemon/bin/Release/net7.0/SpotifyRadio.dll
 for MODE in ${MODES:-file socket}; do
   echo "================ $MODE"
   export SPOTIFY_RADIO_HOME=$S/home_$MODE IPC_DIR=$S/ipc_$MODE KEEP_DIR=$S/keep_$MODE; rm -rf $SPOTIFY_RADIO_HOME $IPC_DIR; mkdir -p $SPOTIFY_RADIO_HOME $IPC_DIR
-  echo "{\"clientId\":\"testclient\",\"apiBase\":\"http://127.0.0.1:47900/v1\",\"accountsBase\":\"http://127.0.0.1:47900\",\"pollSeconds\":1,\"ipcDir\":\"$IPC_DIR\",\"librespotPath\":\"/usr/bin/python3\",\"librespotArgs\":[\"fake_librespot.py\"]}" > $SPOTIFY_RADIO_HOME/config.json
+  echo "{\"sources\":[\"spotify\",\"youtube\"],\"clientId\":\"testclient\",\"apiBase\":\"http://127.0.0.1:47900/v1\",\"accountsBase\":\"http://127.0.0.1:47900\",\"pollSeconds\":1,\"ipcDir\":\"$IPC_DIR\",\"librespotPath\":\"/usr/bin/python3\",\"librespotArgs\":[\"fake_librespot.py\"]}" > $SPOTIFY_RADIO_HOME/config.json
   echo '{"accessToken":"tok1","refreshToken":"refresh1","expiresAtUtc":"2099-01-01T00:00:00Z"}' > $SPOTIFY_RADIO_HOME/tokens.json
   rm -rf "${TMPDIR:-/tmp}/fake_ytdlp"
   echo "stale line" > $IPC_DIR/spotify_radio_out.txt; echo "next" > $IPC_DIR/spotify_radio_cmd.txt
@@ -23,3 +23,9 @@ for MODE in ${MODES:-file socket}; do
   python3 heard_check.py $KEEP_DIR.heard
   head -6 daemon_$MODE.log
 done
+# the first run (questions, downloading yt-dlp and ffmpeg) and a daemon set up for YouTube only
+echo "================ setup"
+python3 setup_check.py
+echo "================ youtube only"
+rm -rf "${TMPDIR:-/tmp}/fake_ytdlp"
+python3 youtube_only.py

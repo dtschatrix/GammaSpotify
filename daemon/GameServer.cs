@@ -80,8 +80,8 @@ public sealed class GameServer
     private const long MaxFileBytes = 1024 * 1024;
 
     private readonly Config _cfg;
-    private readonly IPlayer _spotify;
-    private readonly IPlayer _youtube;
+    private readonly IPlayer? _spotify;
+    private readonly IPlayer? _youtube;
     private readonly TextCodec _codec;
     private readonly ConcurrentDictionary<int, TcpLink> _tcpLinks = new();
     private FileLink? _fileLink;
@@ -91,10 +91,15 @@ public sealed class GameServer
     public GameAudio? Audio { get; set; }
 
     /// <summary>What the transport buttons control: the source the game hears.</summary>
-    private IPlayer Player => Audio?.Current as IPlayer ?? _spotify;
+    private IPlayer Player => Audio?.Current as IPlayer ?? _spotify ?? _youtube!;
 
     /// <summary>Who plays or queues an address: YouTube's start with "yt:".</summary>
-    private IPlayer PlayerFor(string uri) => YouTubeSource.IsUri(uri) ? _youtube : _spotify;
+    private IPlayer PlayerFor(string uri) => YouTubeSource.IsUri(uri)
+        ? _youtube ?? throw new SpotifyException("YouTube is not set up in this daemon (\"sources\" in config.json)")
+        : _spotify ?? throw new SpotifyException("Spotify is not set up in this daemon (\"sources\" in config.json)");
+
+    /// <summary>Until the PDA has a source switch: Spotify's search and playlists if it is set up, YouTube's otherwise.</summary>
+    private IPlayer Searcher => _spotify ?? _youtube!;
 
     private DateTime _lastHeardUtc = DateTime.MinValue;
 
@@ -110,9 +115,12 @@ public sealed class GameServer
     private string _lastPollError = "";
     private int _nextId;
 
-    public GameServer(Config cfg, IPlayer spotify, IPlayer youtube, TextCodec codec)
+    /// <param name="spotify">Null when only YouTube is set up.</param>
+    /// <param name="youtube">Null when only Spotify is set up.</param>
+    public GameServer(Config cfg, IPlayer? spotify, IPlayer? youtube, TextCodec codec)
     {
         _cfg = cfg;
+        if (spotify is null && youtube is null) throw new ArgumentException("no player");
         _spotify = spotify;
         _youtube = youtube;
         _codec = codec;
@@ -427,14 +435,14 @@ public sealed class GameServer
                     break;
                 case "search" when arg.StartsWith("yt ", StringComparison.OrdinalIgnoreCase):
                     // until the PDA has a source switch: "yt ..." searches YouTube Music
-                    await SendResultsAsync(link, arg, await _youtube.SearchAsync(arg[3..].Trim(), ct), ct);
+                    await SendResultsAsync(link, arg, await PlayerFor(YouTubeSource.VideoPrefix).SearchAsync(arg[3..].Trim(), ct), ct);
                     return;
                 case "search":
                     if (arg.Length == 0) throw new SpotifyException("Empty search");
-                    await SendResultsAsync(link, arg, await _spotify.SearchAsync(arg, ct), ct);
+                    await SendResultsAsync(link, arg, await Searcher.SearchAsync(arg, ct), ct);
                     return;
                 case "playlists":
-                    await SendResultsAsync(link, "playlists", await _spotify.MyPlaylistsAsync(ct), ct);
+                    await SendResultsAsync(link, "playlists", await Searcher.MyPlaylistsAsync(ct), ct);
                     return;
                 default:
                     throw new SpotifyException("Unknown command: " + cmd);

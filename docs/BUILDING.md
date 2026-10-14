@@ -40,9 +40,9 @@ Copy the result to `daemon\librespot\librespot.exe`, or set `librespotPath` in `
 
 ## YouTube tools
 
-The YouTube source is not released yet. To try it, put either the unpacked yt-dlp Windows release (`yt-dlp_win.zip` from github.com/yt-dlp/yt-dlp/releases, unzipped into `daemon\yt\yt-dlp_win\`) or the single `yt-dlp.exe` into `daemon\yt\`. Put an LGPL ffmpeg build there as `daemon\yt\ffmpeg.exe`, for example BtbN's `ffmpeg-n8.1-latest-win64-lgpl` from github.com/BtbN/FFmpeg-Builds (its `bin\ffmpeg.exe`), and keep its licence text.
+When YouTube is chosen and yt-dlp or ffmpeg is missing, the daemon offers to download them into `daemon\yt\` (sources and checks under [YouTube](HOW-IT-WORKS.md#youtube)). `--install-youtube` downloads whatever is missing, `--update-youtube` downloads the latest yt-dlp again. From source: `dotnet run -c Release -- --install-youtube`. A single `yt\yt-dlp.exe` or `yt\ffmpeg.exe` put in by hand still works.
 
-How these ship in a release is not decided.
+The release zips contain neither tool; the daemon downloads them on the user's machine.
 
 ## Tests
 
@@ -53,7 +53,7 @@ cd daemon && dotnet build -c Release && cd ../test
 ./run_tests.sh
 ```
 
-Runs twice (file link, socket link), about seven minutes each; `MODES=file` or `MODES=socket` runs one. `exit=0` after each run means all checks passed. `FAKE_BLOCK=400` or `800` fixes the fake engine's buffer size instead of alternating.
+Runs twice (file link, socket link); it also runs `setup_check.py` (first-run questions and the download) and `youtube_only.py` (a daemon set up for YouTube only). About 17 minutes in total; `MODES=file` or `MODES=socket` runs one link. `exit=0` after each run means all checks passed. `FAKE_BLOCK=400` or `800` fixes the fake engine's buffer size instead of alternating.
 
 ## Release
 

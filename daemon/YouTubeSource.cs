@@ -88,24 +88,14 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
 
     // ------------------------------------------------------------------ tools
 
-    private static string? Find(string env, string name)
-    {
-        var over = Environment.GetEnvironmentVariable(env);
-        if (!string.IsNullOrWhiteSpace(over)) return File.Exists(over) ? over : null;
-        var path = Path.Combine(Config.AppDir, "yt", OperatingSystem.IsWindows() ? name + ".exe" : name);
-        return File.Exists(path) ? path : null;
-    }
-
-    // The unpacked release starts about half a second sooner than the single exe, which unpacks
-    // itself on every run (measured: resolve 1.3-1.7 s against 1.85-2.0 s).
-    private static string? YtDlp => Find("SPOTIFY_RADIO_YTDLP", Path.Combine("yt-dlp_win", "yt-dlp")) ?? Find("SPOTIFY_RADIO_YTDLP", "yt-dlp");
-    private static string? Ffmpeg => Find("SPOTIFY_RADIO_FFMPEG", "ffmpeg");
+    private static string? YtDlp => YouTubeTools.YtDlp;
+    private static string? Ffmpeg => YouTubeTools.Ffmpeg;
 
     public string Name => "YouTube";
-    public bool Available => YtDlp is not null && Ffmpeg is not null;
-    public string Missing => "yt-dlp.exe and ffmpeg.exe go in the daemon's yt folder";
+    public bool Available => YouTubeTools.Installed;
+    public string Missing => "yt-dlp and ffmpeg are not in the yt folder: start the daemon with --install-youtube";
 
-    private static SpotifyException NotSetUp() => new("YouTube needs yt-dlp.exe and ffmpeg.exe in the daemon's yt folder");
+    private static SpotifyException NotSetUp() => new("YouTube needs yt-dlp and ffmpeg: start the daemon with --install-youtube");
 
     public void Attach(GameAudio audio) => _audio = audio;
 

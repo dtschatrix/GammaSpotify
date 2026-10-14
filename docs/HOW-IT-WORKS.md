@@ -90,7 +90,7 @@ Without `librespot.exe` the daemon answers `stream unavailable` and the mod is a
 
 ## YouTube
 
-Until the PDA has a source switch, a search that starts with `yt ` goes to YouTube Music. Results are songs, albums and playlists (URIs `yt:video:<id>`, `yt:album:<browseId>`, `yt:playlist:<id>`). Playing one makes YouTube the source the game hears; playing a Spotify result makes Spotify the source again. The transport buttons (play, pause, next, previous, shuffle) act on whichever source is current. The mod scripts need nothing for this; the daemon decides by the `yt ` prefix.
+Until the PDA has a source switch, a search that starts with `yt ` goes to YouTube Music. A plain search goes to Spotify when it is set up and to YouTube Music otherwise; "My playlists" follows the same rule. Results are songs, albums and playlists (URIs `yt:video:<id>`, `yt:album:<browseId>`, `yt:playlist:<id>`). Playing one makes YouTube the source the game hears; playing a Spotify result makes Spotify the source again. The transport buttons (play, pause, next, previous, shuffle) act on whichever source is current. The mod scripts need nothing for this; the daemon decides by the `yt ` prefix and by which sources are set up.
 
 Search is a direct request to YouTube Music's own search endpoint (`music.youtube.com/youtubei/v1/search`, client `WEB_REMIX`), because yt-dlp's search returns titles without artist or length.
 
@@ -106,7 +106,11 @@ YouTube answers "confirm you're not a bot" (or 429) after about 20-25 lookups in
 
 Switching source drops what the game holds. Spotify is paused while YouTube plays; librespot's output is still read at real time and dropped.
 
-It needs `yt\yt-dlp.exe` (or the unpacked release in `yt\yt-dlp_win\`, which starts about half a second faster per lookup) and `yt\ffmpeg.exe` next to `run.bat`. Without them the daemon logs "no YouTube" and everything else works as before.
+`config.json` has `"sources"`: `["spotify"]`, `["youtube"]` or both. On the first run, or with a config from before this existed, the daemon asks "What should play in the game?": 1 Spotify (needs Spotify Premium), 2 YouTube Music (free), 3 both. With an existing Spotify setup, Enter keeps Spotify. Removing `"sources"` makes it ask again. With YouTube only, the daemon asks no Spotify questions (no app registration, no Client ID, no login) and starts no librespot. A Spotify address then gets the error "Spotify is not set up in this daemon".
+
+When YouTube is chosen and yt-dlp or ffmpeg is missing, the daemon offers to download them (about 95 MB download, 190 MB on disk) from their own GitHub releases. yt-dlp is the unpacked Windows build `yt-dlp_win.zip` from github.com/yt-dlp/yt-dlp, going into `yt\yt-dlp_win\`. ffmpeg is the newest stable `win64-lgpl-shared` build from github.com/BtbN/FFmpeg-Builds, going into `yt\ffmpeg\`: only `ffmpeg.exe`, the DLLs it loads and the licence as `LICENSE-ffmpeg.txt`. Each download is checked against the SHA-256 list published in the same release (`SHA2-256SUMS`, `checksums.sha256`); a mismatch is refused and leaves the installed copy as it was. Nothing from these projects ships with the mod. If the offer is declined, the daemon runs without YouTube when Spotify is also chosen, and with YouTube only it stops and says why.
+
+`--install-youtube` downloads whatever is missing; `--update-youtube` downloads the latest yt-dlp again, since YouTube breaks old versions every few weeks. From source: `dotnet run -c Release -- --install-youtube`. A single `yt\ffmpeg.exe` or `yt\yt-dlp.exe` put in by hand still works; the unpacked yt-dlp build starts about half a second faster per lookup.
 
 ## Stopping instead of resuming
 
@@ -138,3 +142,5 @@ Chunks are encoded with the `OggVorbisEncoder` NuGet package. Checked by decodin
 `test/run_tests.sh` runs the daemon against `mock_spotify.py` (fake Web API) and `fake_librespot.py`, and runs the game scripts under LuaJIT in `harness_ui.lua`. The mock keeps a position the way Spotify does; the fake librespot follows its play / pause / track state, leaves a gap when a track loads, and plays track N at position P from a known place in the test audio. The harness fakes the UI, the file index, and the sound streamer: three buffers of 400 or 800 ms, the two-tail limit, and a counter for attaches made after the data ran out, which must be zero. `audio_check.py` decodes the chunks the fake engine received and compares them with the source. `heard_check.py` compares the track and time the PDA showed with the audio the fake engine was playing at that moment. The harness enables world mode for part of its run, then loads unmodified copies of the stream script to check what ships. `QUICK=1` skips the world-mode part.
 
 The YouTube part uses `fake_ytdlp.sh` in place of yt-dlp and the real ffmpeg, decoding WAVs cut from the test audio. `fake_ytdlp.sh` answers after 1.2 s like a real lookup; some ids fail or give a refused address on purpose. The mock server also answers YouTube Music's search.
+
+`run_tests.sh` also runs `setup_check.py` (first-run questions and the download, against fake GitHub releases served locally) and `youtube_only.py` (a daemon set up for YouTube only, driven over the file link like the game does).
