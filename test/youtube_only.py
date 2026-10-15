@@ -87,6 +87,11 @@ try:
     check(wait(lambda l: l[:2] == ["audio", "resume"], 3) is not None and wait(lambda l: l[0] == "chunk", 5) is not None,
           "play: the game is told to carry on and audio comes again")
 
+    lines.clear(); send("seek 20000")
+    mark = wait(lambda l: l[0] == "track" and l[4] == "yt:video:vid00000001", 8)
+    check(mark and 19500 <= int(mark[2]) <= 20500 and any(l[:2] == ["audio", "flush"] for l in lines),
+          "seek: the game drops what it holds and the track goes on at 20 s: %s" % (mark and mark[2]))
+
     lines.clear(); send("next")
     mark = wait(lambda l: l[0] == "track" and l[4] != "yt:video:vid00000001", 12)
     check(mark and mark[4] == "yt:video:vid00000003" and wait(lambda l: l[:2] == ["audio", "flush"], 1),

@@ -91,6 +91,9 @@ class H(BaseHTTPRequestHandler):
             S["transfers"] = S.get("transfers", []) + [S["device"]]
             return self._send(204)
 
+        if p == "/v1/me/player/queue" and method == "GET":   # what plays next: the other test track
+            nxt = TRACKS[(S["idx"] + 1) % len(TRACKS)]
+            return self._send(200, {"currently_playing": None, "queue": [{"uri": nxt[0], "name": nxt[1], "artists": [{"name": nxt[2]}]}]})
         if p.startswith("/v1/me/player/"):
             if not S["active"] and "device_id" not in q:
                 return self._send(404, {"error": {"status": 404, "message": "Player command failed: No active device found", "reason": "NO_ACTIVE_DEVICE"}})

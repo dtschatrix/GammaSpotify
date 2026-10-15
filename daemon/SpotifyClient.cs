@@ -242,6 +242,23 @@ public sealed class SpotifyClient
         return PlayerCommandAsync(HttpMethod.Put, "/me/player/play", body, ct);
     }
 
+    /// <summary>What Spotify plays next: the queue, then the rest of the list. The Web API can only read it.</summary>
+    public async Task<List<SearchItem>> UpNextAsync(int max, CancellationToken ct)
+    {
+        var r = await SendAsync(HttpMethod.Get, "/me/player/queue", null, ct);
+        if (r.Status == 204 || r.Json is null) return new List<SearchItem>();
+        if (!r.Ok) throw new SpotifyException(Friendly(r));
+        return J.Arr(r.Json, "queue")
+            .Select(t => new SearchItem("track", J.Str(t, "uri"), J.Str(t, "name"), J.Obj(t, "show") is { } show ? J.Str(show, "name") : Artists(t)))
+            .Where(i => i.Uri.Length > 0)
+            .Take(max)
+            .ToList();
+    }
+
+    /// <summary>Plays these tracks in this order, from the first.</summary>
+    public Task PlayTracksAsync(IReadOnlyList<string> uris, CancellationToken ct) =>
+        PlayerCommandAsync(HttpMethod.Put, "/me/player/play", new Dictionary<string, object> { ["uris"] = uris.ToArray() }, ct);
+
     public async Task<List<SearchItem>> SearchAsync(string query, CancellationToken ct)
     {
         var limit = Math.Clamp(_cfg.SearchLimit, 1, 10);

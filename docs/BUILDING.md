@@ -1,6 +1,8 @@
 # Building from source
 
-Two things to build: the daemon (C#) and librespot (Rust). The mod is plain script files. Tools are listed under Requirements in the [README](../README.md).
+Two things to build: the daemon (C#) and librespot (Rust). The mod is script, config and texture files. Tools are listed under Requirements in the [README](../README.md).
+
+The PDA tab's texture, `gamedata/textures/ui/ui_spotify_radio.dds`, and its list, `gamedata/configs/ui/textures_descr/ui_spotify_radio.xml`, are written by `tools/make_ui_texture.py` (what they hold: [What the PDA shows](HOW-IT-WORKS.md#what-the-pda-shows)). The engine reads `textures_descr` at startup, so a change to it needs a full game restart.
 
 ## Daemon
 

@@ -1,8 +1,10 @@
 --[[
 	Spotify Radio - PDA screen.
 
-	Takes over the PDA "Radio" tab: now playing, transport buttons, search, your
-	playlists and the Spotify / YouTube switch. All daemon traffic goes through
+	Takes over the PDA "Radio" tab: the source (Spotify or YouTube Music) and the switch between
+	them, what is playing with a seek slider, the transport buttons, search, your playlists, the
+	results and what plays next. Laid out after the "PDA Radio Tab" design; positions and colours of everything
+	that does not change are in ui_spotify_radio.xml. All daemon traffic goes through
 	spotify_radio.script.
 
 	Set REPLACE_RADIO_TAB to false to get the vanilla radio tab back.
@@ -12,14 +14,38 @@ local REPLACE_RADIO_TAB = true
 
 local XML_FILE   = "ui_spotify_radio.xml"
 local ROWS       = 11
-local ROW_STEP   = 38           -- distance between rows
-local ROW_TEXT   = { x = 46,  y = 278 }   -- must match the row_* templates in the XML
-local ROW_PLAY   = { x = 622, y = 280 }
-local ROW_QUEUE  = { x = 700, y = 280 }
-local MAX_TITLE  = 70           -- characters before a row label is cut
-local MAX_NOW    = 62
+local ROW_STEP   = 26           -- distance between rows
+local ROW = {                   -- where row 1's pieces are: must match the row_* and next_* templates in the XML
+	alt   = { x = 40,  y = 403 },
+	kind  = { x = 46,  y = 406 },
+	text  = { x = 114, y = 406 },
+	sub   = { x = 294, y = 406 },
+	play  = { x = 470, y = 404 },
+	queue = { x = 526, y = 404 },
+	next  = { x = 614, y = 406 },
+	rm    = { x = 742, y = 404 },
+}
+-- Labels also cut long text with "..." to their width (SetElipsis); these are a fallback for that.
+local MAX_NOW    = 80
+local MAX_TITLE  = 26
+local MAX_NEXT   = 20
+local MAX_DEVICE = 64
+local MAX_STATUS = 96
+local MAX_LIST   = 64
 local REFRESH_MS = 250
 local ERROR_MS   = 6000         -- how long an error stays in the status line
+local SEEK_STEPS = 1000         -- slider resolution: a thousandth of the track
+local SEEK_SETTLE_MS = 300      -- the slider has no "released" event: it seeks once it has been still this long
+local SEEK_MIN_MS = 2000        -- smaller moves (a turn of the mouse wheel over it) do nothing
+local UPNEXT_MS  = 4000         -- how often the up-next list is asked for while the tab is open
+local UPNEXT_SOON_MS = 800      -- after a click that changes it: the daemon has acted by then
+
+-- text colours that change with the state (the design's palette)
+local RGB = {
+	bright = { 214, 220, 198 }, normal = { 170, 178, 156 }, muted = { 120, 128, 108 }, dim = { 88, 95, 79 },
+	amber = { 214, 170, 90 }, err = { 240, 128, 96 }, spotify = { 29, 185, 84 }, youtube = { 228, 52, 38 },
+}
+local KIND_COLOUR = { TRACK = "normal", ALBUM = "amber" }   -- PLAYLIST: the source's colour
 
 local function cut(text, max)
 	text = tostring(text or "")
@@ -29,19 +55,38 @@ end
 
 local function fmt_time(ms)
 	local s = math.floor((ms or 0) / 1000)
-	return string.format("%d:%02d", math.floor(s / 60), s % 60)
+	return string.format("%02d:%02d", math.floor(s / 60), s % 60)
 end
 
-local function row_label(item)
-	local label = "[" .. item.kind .. "] " .. item.title
-	if item.subtitle ~= "" then label = label .. " - " .. item.subtitle end
-	return cut(label, MAX_TITLE)
+-- Sets a label's text and colour, only when they change. (Engine objects take no fields of
+-- our own, so what each label shows is kept here.)
+local shown_as = setmetatable({}, { __mode = "k" })
+local function put(label, text, colour)
+	local was = shown_as[label]
+	if not was then was = {}; shown_as[label] = was end
+	if was.text ~= text then
+		label:SetText(text)
+		was.text = text
+	end
+	if colour and was.colour ~= colour then
+		local c = RGB[colour]
+		label:SetTextColor(GetARGB(255, c[1], c[2], c[3]))
+		was.colour = colour
+	end
+end
+
+-- A label's text control, cutting long text to the label's width where the engine can.
+local function text_of(static)
+	local tc = static:TextControl()
+	pcall(function() tc:SetElipsis(true) end)
+	return tc
 end
 
 -------------------------------------------------------------------
 -- Search dialog (separate window so the keyboard is not eaten by the PDA)
 -------------------------------------------------------------------
 local SEARCH = nil
+local SINGLETON = nil
 
 class "SpotifySearch" (CUIScriptWnd)
 
@@ -61,11 +106,16 @@ function SpotifySearch:InitControls()
 	xml:ParseFile(XML_FILE)
 
 	self.dialog = xml:InitStatic("search", self)
+	xml:InitStatic("search:background_edge", self.dialog)
 	xml:InitStatic("search:background", self.dialog)
+	self.accent_spotify = xml:InitStatic("search:accent_spotify", self.dialog)
+	self.accent_youtube = xml:InitStatic("search:accent_youtube", self.dialog)
 	self.caption = xml:InitStatic("search:caption", self.dialog):TextControl()
+	xml:InitStatic("search:line", self.dialog)
 
 	self.input = xml:InitEditBox("search:input", self.dialog)
 	self:Register(self.input, "fld_input")
+	xml:InitStatic("search:hint", self.dialog)
 
 	self:Register(xml:Init3tButton("search:btn_ok", self.dialog), "btn_ok")
 	self:Register(xml:Init3tButton("search:btn_cancel", self.dialog), "btn_cancel")
@@ -81,7 +131,10 @@ function SpotifySearch:Reset()
 	-- Taking focus makes the engine send a "commit" from the box if it still held focus
 	-- from last time (closed with a button instead of Enter); self.ready ignores that one.
 	self.ready = false
-	self.caption:SetText(spotify_radio.source_name() == "YouTube" and "Search YouTube Music" or "Search Spotify")
+	local youtube = spotify_radio.source_name() == "YouTube"
+	self.caption:SetText(youtube and "Search YouTube Music" or "Search Spotify")
+	self.accent_spotify:Show(not youtube)
+	self.accent_youtube:Show(youtube)
 	self.input:SetText("")
 	self.input:CaptureFocus(true)
 	self.ready = true
@@ -96,8 +149,8 @@ function SpotifySearch:OnAccept()
 	local text = self.input:GetText() or ""
 	text = text:gsub("^%s+", ""):gsub("%s+$", "")
 	self:Close()
-	if text ~= "" then
-		spotify_radio.search(text)
+	if text ~= "" and spotify_radio.search(text) and SINGLETON then
+		SINGLETON.info = "Searching " .. spotify_radio.source_name() .. ": " .. text
 	end
 end
 
@@ -132,8 +185,6 @@ end
 -------------------------------------------------------------------
 -- PDA tab
 -------------------------------------------------------------------
-local SINGLETON = nil
-
 function get_ui()
 	SINGLETON = SINGLETON or SpotifyTab()
 	return SINGLETON
@@ -147,7 +198,15 @@ function SpotifyTab:__init() super()
 	self.pages = 1
 	self.seen_results = -1
 	self.seen_source = nil
+	self.seen_offline = nil
 	self.next_refresh = 0
+	self.info = ""                  -- the status line when there is no error: what was done last
+	self.seek_set = 0               -- what the script last put on the slider; anything else is the player's hand
+	self.seek_seen = 0
+	self.seek_moved_at = 0
+	self.next_upnext = 0            -- when the up-next list is asked for next
+	self.seen_upnext = -1
+	self.seen_uri = nil
 	self:InitControls()
 	self:InitCallbacks()
 	self:RenderRows()
@@ -162,56 +221,93 @@ function SpotifyTab:InitControls()
 
 	local xml = CScriptXmlInit()
 	xml:ParseFile(XML_FILE)
-
-	xml:InitFrame("frame_head", self)
-	xml:InitFrame("frame_list", self)
-	self.title_spotify = xml:InitStatic("title", self)
-	self.title_youtube = xml:InitStatic("title_youtube", self)
-	self.title_youtube:Show(false)
-
-	self.now_playing = xml:InitStatic("now_playing", self):TextControl()
-	self.status      = xml:InitStatic("status", self):TextControl()
-	self.list_title  = xml:InitStatic("list_title", self):TextControl()
-
-	local function button(name)
+	local function static(name) return xml:InitStatic(name, self) end
+	local function label(name) return text_of(static(name)) end
+	local function button(name, symbol)
 		local btn = xml:Init3tButton(name, self)
 		self:Register(btn, name)
+		if symbol then pcall(function() btn:TextControl():SetText(symbol) end) end
 		return btn
 	end
 
-	self.btn_prev  = button("btn_prev")
-	self.btn_play  = button("btn_play")
-	self.btn_pause = button("btn_pause")
-	self.btn_next  = button("btn_next")
-	button("btn_vol_down")
-	button("btn_vol_up")
-	button("btn_shuffle")
-	button("btn_search")
-	self.btn_playlists = button("btn_playlists")
+	-- drawn in this order, back to front
+	static("panel_edge"); static("panel")
+
+	static("hdr_edge"); static("hdr")
+	static("lbl_tab")
+	self.accent_spotify = static("accent_spotify")
+	self.accent_youtube = static("accent_youtube")
+	self.accent_offline = static("accent_offline")
+	self.title_spotify  = static("title")
+	self.title_youtube  = static("title_youtube")
+	self.title_offline  = static("title_offline")
 	self.btn_to_youtube = button("btn_to_youtube")
 	self.btn_to_spotify = button("btn_to_spotify")
-	self.btn_to_youtube:Show(false)
-	self.btn_to_spotify:Show(false)
-	self.btn_page_prev = button("btn_page_prev")
-	self.btn_page_next = button("btn_page_next")
-	self.btn_pause:Show(false)
 
+	static("np_edge"); static("np")
+	static("np_caption")
+	self.np_state    = label("np_state")
+	self.now_playing = label("now_playing")
+	self.np_time     = label("np_time")
+	self.seek_line   = static("seek_line")      -- under the slider: its own bar is too faint here
+	self.seek_bar    = xml:InitTrackBar("seek_bar", self)
+	self.seek_bar:SetOptIBounds(0, SEEK_STEPS)
+	self.seek_bar:SetIValue(0)
+	self.np_vol      = label("np_vol")
+	self.np_shuffle  = label("np_shuffle")
+	self.np_device   = label("np_device")
+	static("np_line")
+	self.status      = label("status")
+
+	self.btn_prev      = button("btn_prev", "|<")
+	self.btn_play      = button("btn_play", "> PLAY")
+	self.btn_pause     = button("btn_pause", "|| PAUSE")
+	self.btn_next      = button("btn_next", ">|")
+	self.btn_vol_down  = button("btn_vol_down")
+	self.btn_vol_up    = button("btn_vol_up")
+	self.btn_shuffle   = button("btn_shuffle")
+	self.btn_search    = button("btn_search")
+	self.btn_playlists = button("btn_playlists")
+	-- hidden while the daemon is not running (play, pause and playlists have rules of their own)
+	self.controls = { self.btn_prev, self.btn_next, self.btn_vol_down, self.btn_vol_up, self.btn_shuffle, self.btn_search }
+
+	static("list_edge"); static("list")
+	self.list_title    = label("list_title")
+	self.btn_page_prev = button("btn_page_prev", "< PREV")
+	self.btn_page_next = button("btn_page_next", "NEXT >")
+	static("list_line")
+
+	local function at(ctrl, pos, i) ctrl:SetWndPos(vector2():set(pos.x, pos.y + (i - 1) * ROW_STEP)) end
 	for i = 1, ROWS do
-		local dy = (i - 1) * ROW_STEP
-
-		local st = xml:InitStatic("row_text", self)
-		st:SetWndPos(vector2():set(ROW_TEXT.x, ROW_TEXT.y + dy))
-
-		local play = xml:Init3tButton("row_play", self)
-		play:SetWndPos(vector2():set(ROW_PLAY.x, ROW_PLAY.y + dy))
-		self:Register(play, "row_play_" .. i)
-
-		local queue = xml:Init3tButton("row_queue", self)
-		queue:SetWndPos(vector2():set(ROW_QUEUE.x, ROW_QUEUE.y + dy))
-		self:Register(queue, "row_queue_" .. i)
-
-		self.rows[i] = { st = st, text = st:TextControl(), play = play, queue = queue }
+		local alt = static("row_alt")
+		at(alt, ROW.alt, i)
+		self.rows[i] = { alt = alt }
 	end
+	for i = 1, ROWS do
+		local row = self.rows[i]
+		row.kind_st = static("row_kind");  at(row.kind_st, ROW.kind, i);  row.kind = row.kind_st:TextControl()
+		row.st      = static("row_text");  at(row.st, ROW.text, i);       row.text = text_of(row.st)
+		row.sub_st  = static("row_sub");   at(row.sub_st, ROW.sub, i);    row.sub = text_of(row.sub_st)
+		row.play    = xml:Init3tButton("row_play", self);   at(row.play, ROW.play, i);   self:Register(row.play, "row_play_" .. i)
+		row.queue   = xml:Init3tButton("row_queue", self);  at(row.queue, ROW.queue, i); self:Register(row.queue, "row_queue_" .. i)
+	end
+	self.help = { static("help_1"), static("help_2"), static("help_3") }
+
+	-- up next: a column of its own, rows like the results'
+	self.next_parts = { static("next_edge"), static("next"), static("next_caption"), static("next_line") }
+	self.next_rows = {}
+	for i = 1, ROWS do
+		local row = {}
+		row.st = static("next_text");  at(row.st, ROW.next, i);  row.text = text_of(row.st)
+		row.rm = xml:Init3tButton("next_rm", self);  at(row.rm, ROW.rm, i);  self:Register(row.rm, "next_rm_" .. i)
+		self.next_rows[i] = row
+	end
+
+	for _, c in ipairs({ self.accent_youtube, self.accent_offline, self.title_youtube, self.title_offline,
+	                     self.btn_to_youtube, self.btn_to_spotify, self.btn_pause, self.seek_line, self.seek_bar }) do
+		c:Show(false)
+	end
+	for _, h in ipairs(self.help) do h:Show(false) end
 end
 
 function SpotifyTab:InitCallbacks()
@@ -219,14 +315,15 @@ function SpotifyTab:InitCallbacks()
 		self:AddCallback(name, ui_events.BUTTON_CLICKED, fn, self)
 	end
 
-	-- The stream script is told first, so the sound in game reacts before Spotify does.
+	-- The stream script is told first, so the sound in game reacts before the daemon does.
 	-- place_here is for the switched-off world mode (moves the radio to the player).
 	local stream = spotify_radio_stream
 	local function volume(delta)
 		-- the sound's own volume when the music plays in game, Spotify's otherwise
 		if not stream.adjust_volume(delta) then spotify_radio.send("volrel " .. delta) end
 	end
-	click("btn_prev",      function() stream.place_here(); stream.user("change"); spotify_radio.send("prev") end)
+	-- (anything that changes what plays next asks for the up-next list again shortly)
+	click("btn_prev",      function() stream.place_here(); stream.user("change"); spotify_radio.send("prev"); self:UpNextSoon() end)
 	click("btn_play", function()
 		stream.place_here(); stream.user("play")
 		if spotify_radio.send("play") then spotify_radio.expect_status("playing") end
@@ -235,26 +332,63 @@ function SpotifyTab:InitCallbacks()
 		stream.user("pause")
 		if spotify_radio.send("pause") then spotify_radio.expect_status("paused") end
 	end)
-	click("btn_next",      function() stream.place_here(); stream.user("change"); spotify_radio.send("next") end)
+	click("btn_next",      function() stream.place_here(); stream.user("change"); spotify_radio.send("next"); self:UpNextSoon() end)
 	click("btn_vol_down",  function() volume(-10) end)
 	click("btn_vol_up",    function() volume(10) end)
 	click("btn_shuffle",   function()
 		spotify_radio.send("shuffle " .. (spotify_radio.state.shuffle and "off" or "on"))
+		self:UpNextSoon()
 	end)
 	click("btn_search",    function() open_search() end)
-	-- the switch: what the game holds of the old source goes at once, like a track change
-	local function switch(name)
-		if spotify_radio.switch_source(name) then stream.place_here(); stream.user("change") end
+	click("btn_playlists", function()
+		if spotify_radio.request_playlists() then self.info = "Loading your playlists" end
+	end)
+	-- the switch: what the game holds of the old source goes at once, like a track change, and the
+	-- list goes too (its results are the other source's)
+	local function switch(name, says)
+		if spotify_radio.switch_source(name) then
+			stream.place_here(); stream.user("change")
+			spotify_radio.clear_results()
+			self.info = says
+			self:UpNextSoon()
+		end
 	end
-	click("btn_to_youtube", function() switch("youtube") end)
-	click("btn_to_spotify", function() switch("spotify") end)
-	click("btn_playlists", function() spotify_radio.request_playlists() end)
+	click("btn_to_youtube", function() switch("youtube", "Switched to YouTube Music") end)
+	click("btn_to_spotify", function() switch("spotify", "Switched to Spotify") end)
 	click("btn_page_prev", function() self:SetPage(self.page - 1) end)
 	click("btn_page_next", function() self:SetPage(self.page + 1) end)
 
 	for i = 1, ROWS do
 		click("row_play_" .. i,  function() self:OnRow(i, false) end)
 		click("row_queue_" .. i, function() self:OnRow(i, true) end)
+		click("next_rm_" .. i,   function() self:OnRemove(i) end)
+	end
+end
+
+function SpotifyTab:UpNextSoon()
+	self.next_upnext = math.min(self.next_upnext, time_global() + UPNEXT_SOON_MS)
+end
+
+-- X on an up-next row (YouTube only)
+function SpotifyTab:OnRemove(row)
+	local item = spotify_radio.upnext[row]
+	if item and spotify_radio.unqueue(row - 1, item.uri) then self.info = "Taken out: " .. item.title end
+end
+
+function SpotifyTab:RenderNext()
+	local offline = self.seen_offline == true
+	local items = spotify_radio.upnext
+	local removable = spotify_radio.upnext_source == "youtube"
+	for _, p in ipairs(self.next_parts) do p:Show(not offline) end
+	for i = 1, ROWS do
+		local row, item = self.next_rows[i], not offline and items[i] or nil
+		if item then
+			put(row.text, cut(i .. ". " .. item.title, MAX_NEXT), "normal")
+		elseif i == 1 and not offline then
+			put(row.text, "nothing queued", "muted")
+		end
+		row.st:Show(item ~= nil or (i == 1 and not offline))
+		row.rm:Show(item ~= nil and removable)
 	end
 end
 
@@ -266,12 +400,13 @@ function SpotifyTab:OnRow(row, queue)
 	local item = self:ItemAt(row)
 	if not item then return end
 	if queue then
-		spotify_radio.queue_uri(item.uri)
+		if spotify_radio.queue_uri(item.uri) then self.info = "Queued: " .. item.title end
 	else
 		spotify_radio_stream.place_here()
 		spotify_radio_stream.user("change")
 		spotify_radio.play_uri(item.uri)
 	end
+	self:UpNextSoon()
 end
 
 function SpotifyTab:SetPage(page)
@@ -282,97 +417,173 @@ end
 
 function SpotifyTab:RenderRows()
 	local results = spotify_radio.results
+	local offline = self.seen_offline == true
+	local youtube = self.seen_source == "youtube"
 	self.pages = math.max(1, math.ceil(#results / ROWS))
 	if self.page > self.pages then self.page = self.pages end
 
 	for i = 1, ROWS do
-		local row, item = self.rows[i], self:ItemAt(i)
+		local row = self.rows[i]
+		local item = not offline and self:ItemAt(i) or nil
 		if item then
-			row.text:SetText(row_label(item))
+			local kind = string.upper(item.kind)
+			put(row.kind, kind, KIND_COLOUR[kind] or (kind == "PLAYLIST" and (youtube and "youtube" or "spotify")) or "normal")
+			put(row.text, cut(item.title, MAX_TITLE))
+			put(row.sub, cut(item.subtitle, MAX_TITLE))
 		end
+		row.alt:Show(item ~= nil and i % 2 == 0)     -- every second row is shaded
+		row.kind_st:Show(item ~= nil)
 		row.st:Show(item ~= nil)
+		row.sub_st:Show(item ~= nil)
 		row.play:Show(item ~= nil)
 		row.queue:Show(item ~= nil and item.kind == "track")
 	end
 
-	local title
-	if self.seen_results <= 0 and #results == 0 then
-		title = self.seen_source == "youtube" and "Search YouTube Music" or "Search, or open one of your playlists"
-	elseif #results == 0 then
-		title = "Nothing found: " .. cut(spotify_radio.results_title, 22)
+	local title, colour = nil, "bright"
+	if offline then
+		title, colour = "NOT CONNECTED", "err"
+	elseif #results == 0 and (self.seen_results <= 0 or spotify_radio.results_title == "") then   -- nothing searched yet
+		title, colour = youtube and "Search YouTube Music" or "Search, or open one of your playlists", "muted"
 	else
-		title = cut(spotify_radio.results_title, 22) .. "  (" .. #results .. ")"
-		if self.pages > 1 then title = title .. "  page " .. self.page .. "/" .. self.pages end
+		local name = spotify_radio.results_title == "playlists" and "MY PLAYLISTS" or spotify_radio.results_title
+		if #results == 0 then
+			title = "Nothing found: " .. name
+		else
+			title = name .. " (" .. #results .. ")"
+			if self.pages > 1 then title = title .. "  page " .. self.page .. "/" .. self.pages end
+		end
 	end
-	self.list_title:SetText(title)
-	self.btn_page_prev:Show(self.pages > 1)
-	self.btn_page_next:Show(self.pages > 1)
+	put(self.list_title, cut(title, MAX_LIST), colour)
+	self:RenderNext()
+	self.btn_page_prev:Show(not offline and self.pages > 1)
+	self.btn_page_next:Show(not offline and self.pages > 1)
+	for _, h in ipairs(self.help) do h:Show(offline) end
 end
 
 function SpotifyTab:Refresh()
 	local s = spotify_radio.shown
 	local now = time_global()
+	local offline = s.status == "offline"
+	local youtube = not offline and s.source == "youtube"
+	local accent = youtube and "youtube" or "spotify"
+	local playing, paused = s.status == "playing", s.status == "paused"
 
-	-- top line
-	local line
-	if s.status == "offline" then
-		line = "Not connected"
-	elseif s.status == "nodevice" then
-		line = "Nothing active - open the Spotify app"
-	elseif s.title == "" then
-		line = "Nothing playing"
-	else
-		line = s.artist ~= "" and (s.artist .. " - " .. s.title) or s.title
-	end
-	self.now_playing:SetText(cut(line, MAX_NOW))
-
-	-- status line
-	local status
-	if spotify_radio.last_error ~= "" and now - spotify_radio.last_error_at < ERROR_MS then
-		status = "! " .. spotify_radio.last_error
-	elseif s.status == "offline" then
-		status = "Waiting for the daemon - start run.bat in spotify-radio-daemon"
-	else
-		local parts = {}
-		if s.duration > 0 then
-			parts[#parts + 1] = fmt_time(spotify_radio.shown_position()) .. " / " .. fmt_time(s.duration)
-		end
-		if s.status == "paused" then parts[#parts + 1] = "paused" end
-		local volume = spotify_radio_stream.get_volume() or s.volume
-		if volume >= 0 then parts[#parts + 1] = "vol " .. volume .. "%" end
-		if s.shuffle then parts[#parts + 1] = "shuffle" end
-		if s.device ~= "" then parts[#parts + 1] = cut(s.device, 20) end
-		status = table.concat(parts, "   ")
-	end
-	self.status:SetText(cut(status, 78))
-
-	local playing = s.status == "playing"
-	self.btn_play:Show(not playing)
-	self.btn_pause:Show(playing)
-
-	-- source: title, switch, and no "My playlists" for YouTube (it has none yet)
-	local youtube = s.source == "youtube"
-	local both = spotify_radio.can_switch() and s.status ~= "offline"
-	self.title_spotify:Show(not youtube)
+	-- header: the source, and the switch when the daemon has both
+	self.title_spotify:Show(not offline and not youtube)
 	self.title_youtube:Show(youtube)
+	self.title_offline:Show(offline)
+	self.accent_spotify:Show(not offline and not youtube)
+	self.accent_youtube:Show(youtube)
+	self.accent_offline:Show(offline)
+	local both = spotify_radio.can_switch() and not offline
 	self.btn_to_youtube:Show(both and not youtube)
 	self.btn_to_spotify:Show(both and youtube)
-	self.btn_playlists:Show(not youtube)
-	if s.source ~= self.seen_source then
-		self.seen_source = s.source
-		self:RenderRows()
+
+	-- now playing
+	if offline then put(self.np_state, "NO LINK", "err")
+	elseif playing then put(self.np_state, "> PLAYING", accent)
+	elseif paused then put(self.np_state, "|| PAUSED", "amber")
+	else put(self.np_state, "-- IDLE", "muted") end
+
+	if offline then
+		put(self.now_playing, "-- radio daemon not running --", "muted")
+	elseif s.title == "" then
+		put(self.now_playing, "-- nothing playing --", "muted")
+	else
+		put(self.now_playing, cut(s.artist ~= "" and (s.artist .. " - " .. s.title) or s.title, MAX_NOW), "bright")
 	end
 
+	-- time and the slider, which follows what is heard unless the player has it in hand
+	local can_seek = not offline and (playing or paused) and s.duration > 0
+	if not can_seek then
+		put(self.np_time, "--:-- / --:--", "muted")
+	elseif self:Seeking() then           -- where the slider would jump to
+		put(self.np_time, fmt_time(self.seek_bar:GetIValue() / SEEK_STEPS * s.duration) .. " / " .. fmt_time(s.duration), "amber")
+	else
+		put(self.np_time, fmt_time(spotify_radio.shown_position()) .. " / " .. fmt_time(s.duration), "normal")
+	end
+	self.seek_line:Show(can_seek)
+	self.seek_bar:Show(can_seek)
+	if can_seek and not self:Seeking() then
+		local v = math.max(0, math.min(SEEK_STEPS, math.floor(spotify_radio.shown_position() / s.duration * SEEK_STEPS + 0.5)))
+		if v ~= self.seek_set then
+			self.seek_bar:SetIValue(v)
+			self.seek_set, self.seek_seen = v, v
+		end
+	end
+
+	local volume = spotify_radio_stream.get_volume() or s.volume
+	put(self.np_vol, (not offline and volume >= 0) and ("VOL " .. volume .. "%") or "VOL --", "normal")
+	put(self.np_shuffle, offline and "SHUFFLE --" or (s.shuffle and "SHUFFLE ON" or "SHUFFLE OFF"), "normal")
+	local device = offline and "--" or s.status == "nodevice" and "none - open Spotify on your PC or phone"
+		or (s.device ~= "" and s.device or "--")
+	put(self.np_device, cut("DEVICE: " .. device, MAX_DEVICE), "muted")
+
+	-- status line: an error for a few seconds, else what was done last
+	if spotify_radio.last_error ~= "" and now - spotify_radio.last_error_at < ERROR_MS then
+		put(self.status, cut("! " .. spotify_radio.last_error, MAX_STATUS), "err")
+	elseif offline then
+		put(self.status, "! Daemon not running - start run.bat", "err")
+	else
+		put(self.status, cut(self.info, MAX_STATUS), "normal")
+	end
+
+	-- buttons
+	for _, b in ipairs(self.controls) do b:Show(not offline) end
+	self.btn_play:Show(not offline and not playing)
+	self.btn_pause:Show(not offline and playing)
+	self.btn_playlists:Show(not offline and not youtube)
+
+	-- the list (or, without the daemon, how to start it)
+	local changed = false
 	if spotify_radio.results_version ~= self.seen_results then
 		self.seen_results = spotify_radio.results_version
 		self.page = 1
-		self:RenderRows()
+		self.info = ""                   -- "Searching ..." is answered
+		changed = true
 	end
+	if s.source ~= self.seen_source or offline ~= self.seen_offline then
+		self.seen_source, self.seen_offline = s.source, offline
+		changed = true
+	end
+	if changed then self:RenderRows() end
+	if spotify_radio.upnext_version ~= self.seen_upnext then
+		self.seen_upnext = spotify_radio.upnext_version
+		self:RenderNext()
+	end
+	if s.uri ~= self.seen_uri then           -- another track: the list has moved on
+		self.seen_uri = s.uri
+		self:UpNextSoon()
+	end
+end
+
+function SpotifyTab:Seeking()
+	return self.seek_bar:GetIValue() ~= self.seek_set
+end
+
+-- The slider was moved and has been still for a moment: jump there.
+function SpotifyTab:CheckSeek(now)
+	local v = self.seek_bar:GetIValue()
+	if v ~= self.seek_seen then self.seek_seen, self.seek_moved_at = v, now end
+	if v == self.seek_set or now - self.seek_moved_at < SEEK_SETTLE_MS then return end
+	self.seek_set = v
+	local s = spotify_radio.shown
+	if s.duration <= 0 or not spotify_radio.is_connected() then return end
+	local ms = v / SEEK_STEPS * s.duration
+	if math.abs(ms - spotify_radio.shown_position()) < SEEK_MIN_MS then return end
+	spotify_radio_stream.user("change")   -- what the game holds is from before the jump
+	spotify_radio.seek(ms)
+	self.next_refresh = 0
 end
 
 function SpotifyTab:Update()
 	CUIScriptWnd.Update(self)
 	local now = time_global()
+	self:CheckSeek(now)
+	if now >= self.next_upnext then
+		self.next_upnext = now + UPNEXT_MS
+		if spotify_radio.is_connected() then spotify_radio.request_upnext() end
+	end
 	if now < self.next_refresh then return end
 	self.next_refresh = now + REFRESH_MS
 	self:Refresh()

@@ -9,11 +9,13 @@ namespace SpotifyRadio;
 /// <summary>
 /// Line protocol for the game, one command per line, tab-separated replies.
 ///   game -> daemon: hello | ping | state | toggle | play | pause | next | prev | vol N | volrel +-N |
-///                   shuffle on|off | search TEXT | playlists | playuri URI | queue URI | source NAME [URI MS] |
+///                   shuffle on|off | seek MS | search TEXT | playlists | playuri URI | queue URI | source NAME [URI MS] |
+///                   upnext | unqueue INDEX URI |
 ///                   stream start MODE FOLDER | stream stop | gamevol 0..100 | buf MS LAST [hold] | log TEXT
 ///   daemon -> game: hello | pong | state ... | ok CMD | error MSG | results_begin / result / results_end |
 ///                   chunk NAME MS INDEX | stream started MODE VOLUME | stream stopped|failed|unavailable|ended |
-///                   audio hold|resume|flush | track INDEX POS DURATION URI ARTIST TITLE
+///                   audio hold|resume|flush | track INDEX POS DURATION URI ARTIST TITLE |
+///                   upnext_begin SOURCE / upnext_item N KIND URI TITLE SUBTITLE / upnext_end COUNT
 ///
 /// Two transports carry the same lines:
 ///   - TCP on 127.0.0.1 (only usable when the game exposes LuaSocket, i.e. lua_debug 1)
@@ -108,6 +110,7 @@ public sealed class GameServer
         .Select(p => p!);
 
     private DateTime _lastHeardUtc = DateTime.MinValue;
+    private volatile List<SearchItem> _lastResults = new();   // the list the PDA shows
 
     /// <summary>Time since the game last said anything.</summary>
     public TimeSpan GameQuiet => DateTime.UtcNow - _lastHeardUtc;
@@ -363,6 +366,13 @@ public sealed class GameServer
             }
             return;
         }
+        if (cmd == "upnext")
+        {
+            // asked every few seconds while the PDA tab is open, so not logged
+            try { await SendUpNextAsync(link, ct); }
+            catch (Exception e) when (e is SpotifyException or HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested) { }
+            return;
+        }
         if (cmd == "log")
         {
             Log.Info("   game: " + arg);
@@ -433,8 +443,15 @@ public sealed class GameServer
                 case "shuffle":
                     await Player.SetShuffleAsync(arg is "on" or "1" or "true", ct);
                     break;
+                case "seek":
+                    await Player.SeekAsync(Math.Max(0, ParseInt(arg)), ct);
+                    break;
                 case "playuri":
-                    await PlayerFor(arg).PlayUriAsync(arg, ct);
+                    // A Spotify track from the list plays with the list's tracks after it, so next goes on down the list
+                    if (_spotify is SpotifySource spotify && TracksFrom(arg) is { Count: > 1 } tracks)
+                        await spotify.PlayTracksAsync(tracks, ct);
+                    else
+                        await PlayerFor(arg).PlayUriAsync(arg, ct);
                     break;
                 case "queue":
                     await PlayerFor(arg).QueueAsync(arg, ct);
@@ -455,6 +472,15 @@ public sealed class GameServer
                 case "playlists":
                     await SendResultsAsync(link, "playlists", await Player.MyPlaylistsAsync(ct), ct);
                     return;
+                case "unqueue":
+                {
+                    // unqueue <index in the up-next list> <its address>: the address guards against a list that moved on
+                    var parts = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length != 2) throw new FormatException("unqueue needs a position and an address");
+                    await Player.RemoveUpNextAsync(ParseInt(parts[0]), parts[1], ct);
+                    await SendUpNextAsync(link, ct);
+                    return;
+                }
                 default:
                     throw new SpotifyException("Unknown command: " + cmd);
             }
@@ -503,8 +529,33 @@ public sealed class GameServer
     private static int ParseInt(string s) =>
         int.TryParse(s, out var n) ? n : throw new FormatException("Expected a number, got: " + s);
 
+    private const int UpNextMax = 11;            // rows in the PDA's up-next column
+
+    /// <summary>What plays next on the source the game hears, as one write.</summary>
+    private async Task SendUpNextAsync(ILink link, CancellationToken ct)
+    {
+        var player = Player;
+        var items = await player.UpNextAsync(UpNextMax, ct);
+        var sb = new StringBuilder();
+        sb.Append(Format("upnext_begin", IdOf(player)));
+        for (var i = 0; i < items.Count; i++)
+            sb.Append(Format("upnext_item", i.ToString(), items[i].Kind, items[i].Uri, items[i].Title, items[i].Subtitle));
+        sb.Append(Format("upnext_end", items.Count.ToString()));
+        await link.WriteAsync(_codec.Wire.GetBytes(sb.ToString()), ct);
+    }
+
+    /// <summary>The Spotify tracks of the list the PDA shows, from this one on; null when it is not in it.</summary>
+    private List<string>? TracksFrom(string uri)
+    {
+        if (!uri.StartsWith("spotify:track:", StringComparison.Ordinal)) return null;
+        var list = _lastResults;
+        var at = list.FindIndex(r => r.Uri == uri);
+        return at < 0 ? null : list.Skip(at).Where(r => r.Uri.StartsWith("spotify:track:", StringComparison.Ordinal)).Take(50).Select(r => r.Uri).ToList();
+    }
+
     private async Task SendResultsAsync(ILink link, string title, List<SearchItem> items, CancellationToken ct)
     {
+        _lastResults = items;
         // One write for the whole listing so the game never sees half of it.
         var sb = new StringBuilder();
         sb.Append(Format("results_begin", title));

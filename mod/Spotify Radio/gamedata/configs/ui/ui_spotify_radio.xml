@@ -1,116 +1,208 @@
 <w>
 	<!-- ============================ PDA tab ============================ -->
-	<!-- The PDA's own tab bar sits above y=137, so everything lives below it. -->
-	<frame_head x="28" y="137" width="764" height="88" stretch="1">
-		<texture>ui_inGame2_pda_buttons_background</texture>
-	</frame_head>
-
-	<frame_list x="28" y="229" width="764" height="479" stretch="1">
-		<texture>ui_inGame2_pda_buttons_background</texture>
-	</frame_list>
-
-	<!-- The source the game hears; the script shows one of the two titles. -->
-	<title x="46" y="145" width="200" height="18">
-		<text font="letterica16" r="30" g="215" b="96" a="255" vert_align="c">SPOTIFY</text>
+	<!-- Laid out after the "PDA Radio Tab" design (Claude Design). The panel is the PDA's content area, -->
+	<!-- x 28..792, y 137..708 on the 1024 x 768 grid. Flat colours are spr_white tinted here; the -->
+	<!-- buttons and the search box use their own pieces of ui_spotify_radio.dds (tools/make_ui_texture.py). -->
+	<panel_edge x="28" y="137" width="764" height="571" stretch="1"><texture r="58" g="66" b="52" a="255">spr_white</texture></panel_edge>
+	<panel x="29" y="138" width="762" height="569" stretch="1"><texture r="18" g="21" b="17" a="255">spr_white</texture></panel>
+	<!-- header: RADIO, the source, the switch -->
+	<hdr_edge x="28" y="137" width="764" height="36" stretch="1"><texture r="58" g="66" b="52" a="255">spr_white</texture></hdr_edge>
+	<hdr x="29" y="138" width="762" height="34" stretch="1"><texture r="26" g="30" b="24" a="255">spr_white</texture></hdr>
+	<lbl_tab x="40" y="145" width="60" height="20">
+		<text font="letterica18" r="214" g="220" b="198" a="255" align="l" vert_align="c">RADIO</text>
+	</lbl_tab>
+	<accent_spotify x="104" y="147" width="4" height="16" stretch="1"><texture r="29" g="185" b="84" a="255">spr_white</texture></accent_spotify>
+	<accent_youtube x="104" y="147" width="4" height="16" stretch="1"><texture r="228" g="52" b="38" a="255">spr_white</texture></accent_youtube>
+	<accent_offline x="104" y="147" width="4" height="16" stretch="1"><texture r="240" g="128" b="96" a="255">spr_white</texture></accent_offline>
+	<title x="114" y="145" width="240" height="20">
+		<text font="letterica18" r="29" g="185" b="84" a="255" align="l" vert_align="c">SPOTIFY</text>
 	</title>
-	<title_youtube x="46" y="145" width="200" height="18">
-		<text font="letterica16" r="235" g="50" b="50" a="255" vert_align="c">YOUTUBE MUSIC</text>
+	<title_youtube x="114" y="145" width="240" height="20">
+		<text font="letterica18" r="228" g="52" b="38" a="255" align="l" vert_align="c">YOUTUBE MUSIC</text>
 	</title_youtube>
-
-	<!-- The source switch, shown when the daemon has both. -->
-	<btn_to_youtube x="200" y="139" width="150" height="24" stretch="1" check_mode="0">
-		<text font="letterica16">Switch to YouTube</text>
-		<texture>ui_button_ordinary</texture>
+	<title_offline x="114" y="145" width="240" height="20">
+		<text font="letterica18" r="240" g="128" b="96" a="255" align="l" vert_align="c">OFFLINE</text>
+	</title_offline>
+	<btn_to_youtube x="612" y="141" width="172" height="28" stretch="1" check_mode="0">
+		<text font="letterica16">SWITCH: YOUTUBE MUSIC</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_172x28</texture>
 	</btn_to_youtube>
-	<btn_to_spotify x="200" y="139" width="150" height="24" stretch="1" check_mode="0">
-		<text font="letterica16">Switch to Spotify</text>
-		<texture>ui_button_ordinary</texture>
+	<btn_to_spotify x="612" y="141" width="172" height="28" stretch="1" check_mode="0">
+		<text font="letterica16">SWITCH: SPOTIFY</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_172x28</texture>
 	</btn_to_spotify>
-
-	<now_playing x="46" y="162" width="540" height="24">
-		<text font="letterica18" r="220" g="220" b="220" a="255" vert_align="c"/>
+	<!-- now playing; colours that change with the state are set by the script -->
+	<np_edge x="36" y="181" width="748" height="132" stretch="1"><texture r="58" g="66" b="52" a="255">spr_white</texture></np_edge>
+	<np x="37" y="182" width="746" height="130" stretch="1"><texture r="26" g="30" b="24" a="255">spr_white</texture></np>
+	<np_caption x="48" y="189" width="200" height="18">
+		<text font="letterica16" r="120" g="128" b="108" a="255" align="l" vert_align="c">NOW PLAYING</text>
+	</np_caption>
+	<np_state x="572" y="189" width="200" height="18">
+		<text font="letterica16" r="120" g="128" b="108" a="255" align="r" vert_align="c"></text>
+	</np_state>
+	<now_playing x="48" y="211" width="724" height="24">
+		<text font="letterica18" r="214" g="220" b="198" a="255" align="l" vert_align="c"></text>
 	</now_playing>
-
-	<status x="46" y="190" width="540" height="20">
-		<text font="letterica16" r="140" g="140" b="140" a="255" vert_align="c"/>
+	<np_time x="48" y="239" width="124" height="20">
+		<text font="letterica18" r="170" g="178" b="156" a="255" align="l" vert_align="c"></text>
+	</np_time>
+	<!-- where the track is: drag to jump (the engine's slider from the options menu, its own look; -->
+	<!-- its bar is too faint on this panel, so a line is drawn under it) -->
+	<seek_line x="176" y="248" width="596" height="2" stretch="1"><texture r="90" g="102" b="80" a="255">spr_white</texture></seek_line>
+	<seek_bar x="176" y="241" width="596" height="16" is_integer="1" step="1"/>
+	<np_vol x="48" y="265" width="96" height="18">
+		<text font="letterica16" r="170" g="178" b="156" a="255" align="l" vert_align="c"></text>
+	</np_vol>
+	<np_shuffle x="152" y="265" width="120" height="18">
+		<text font="letterica16" r="170" g="178" b="156" a="255" align="l" vert_align="c"></text>
+	</np_shuffle>
+	<np_device x="280" y="265" width="492" height="18">
+		<text font="letterica16" r="120" g="128" b="108" a="255" align="l" vert_align="c"></text>
+	</np_device>
+	<np_line x="48" y="287" width="724" height="1" stretch="1"><texture r="58" g="66" b="52" a="255">spr_white</texture></np_line>
+	<status x="48" y="291" width="724" height="18">
+		<text font="letterica16" r="170" g="178" b="156" a="255" align="l" vert_align="c"></text>
 	</status>
-
-	<btn_prev x="620" y="148" width="48" height="30" stretch="1">
-		<texture>ui_inGame2_pda_Filtr_radio_plyr_btn_prev</texture>
+	<!-- controls; the script gives the transport and page buttons their symbols, which are kept out of the XML -->
+	<btn_prev x="36" y="321" width="52" height="32" stretch="1" check_mode="0">
+		<text font="letterica18">PREV</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_52x32</texture>
 	</btn_prev>
-	<btn_play x="672" y="148" width="48" height="30" stretch="1">
-		<texture>ui_inGame2_pda_Filtr_radio_plyr_btn_start2</texture>
+	<btn_play x="94" y="321" width="96" height="32" stretch="1" check_mode="0">
+		<text font="letterica18">PLAY</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_96x32</texture>
 	</btn_play>
-	<btn_pause x="672" y="148" width="48" height="30" stretch="1">
-		<texture>ui_inGame2_pda_Filtr_radio_plyr_btn_stop2</texture>
+	<btn_pause x="94" y="321" width="96" height="32" stretch="1" check_mode="0">
+		<text font="letterica18">PAUSE</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_96x32</texture>
 	</btn_pause>
-	<btn_next x="724" y="148" width="48" height="30" stretch="1">
-		<texture>ui_inGame2_pda_Filtr_radio_plyr_btn_next</texture>
+	<btn_next x="196" y="321" width="52" height="32" stretch="1" check_mode="0">
+		<text font="letterica18">NEXT</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_52x32</texture>
 	</btn_next>
-	<btn_vol_down x="620" y="184" width="48" height="30" stretch="1">
-		<texture>ui_inGame2_pda_Filtr_radio_plyr_btn_v_down</texture>
+	<btn_vol_down x="264" y="321" width="64" height="32" stretch="1" check_mode="0">
+		<text font="letterica16">VOL -</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_64x32</texture>
 	</btn_vol_down>
-	<btn_vol_up x="672" y="184" width="48" height="30" stretch="1">
-		<texture>ui_inGame2_pda_Filtr_radio_plyr_btn_v_up</texture>
+	<btn_vol_up x="334" y="321" width="64" height="32" stretch="1" check_mode="0">
+		<text font="letterica16">VOL +</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_64x32</texture>
 	</btn_vol_up>
-	<btn_shuffle x="724" y="184" width="48" height="30" stretch="1">
-		<texture>ui_inGame2_pda_Filtr_radio_plyr_btn_shuffle</texture>
+	<btn_shuffle x="404" y="321" width="96" height="32" stretch="1" check_mode="0">
+		<text font="letterica16">SHUFFLE</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_96x32</texture>
 	</btn_shuffle>
-
-	<btn_search x="46" y="240" width="100" height="28" stretch="1" check_mode="0">
-		<text font="letterica16">Search</text>
-		<texture>ui_button_ordinary</texture>
+	<btn_search x="576" y="321" width="96" height="32" stretch="1" check_mode="0">
+		<text font="letterica16">SEARCH</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_96x32</texture>
 	</btn_search>
-	<btn_playlists x="152" y="240" width="100" height="28" stretch="1" check_mode="0">
-		<text font="letterica16">My playlists</text>
-		<texture>ui_button_ordinary</texture>
+	<btn_playlists x="678" y="321" width="106" height="32" stretch="1" check_mode="0">
+		<text font="letterica16">MY PLAYLISTS</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_106x32</texture>
 	</btn_playlists>
-
-	<list_title x="264" y="240" width="406" height="28">
-		<text font="letterica16" r="140" g="140" b="140" a="255" vert_align="c"/>
+	<!-- results -->
+	<list_edge x="36" y="365" width="560" height="335" stretch="1"><texture r="58" g="66" b="52" a="255">spr_white</texture></list_edge>
+	<list x="37" y="366" width="558" height="333" stretch="1"><texture r="26" g="30" b="24" a="255">spr_white</texture></list>
+	<list_title x="46" y="370" width="410" height="22">
+		<text font="letterica18" r="214" g="220" b="198" a="255" align="l" vert_align="c"></text>
 	</list_title>
-
-	<btn_page_prev x="676" y="240" width="46" height="28" stretch="1" check_mode="0">
-		<text font="letterica16">Prev</text>
-		<texture>ui_button_ordinary</texture>
+	<btn_page_prev x="464" y="369" width="62" height="24" stretch="1" check_mode="0">
+		<text font="letterica16">PREV</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_62x24</texture>
 	</btn_page_prev>
-	<btn_page_next x="728" y="240" width="46" height="28" stretch="1" check_mode="0">
-		<text font="letterica16">Next</text>
-		<texture>ui_button_ordinary</texture>
+	<btn_page_next x="530" y="369" width="62" height="24" stretch="1" check_mode="0">
+		<text font="letterica16">NEXT</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_62x24</texture>
 	</btn_page_next>
-
-	<!-- Row templates: the script creates one set per row and moves it into place. -->
-	<row_text x="46" y="278" width="560" height="30">
-		<text font="letterica16" r="200" g="200" b="200" a="255" vert_align="c"/>
+	<list_line x="44" y="397" width="544" height="1" stretch="1"><texture r="58" g="66" b="52" a="255">spr_white</texture></list_line>
+	<!-- row templates: the script makes one set per row, 26 px apart, and moves it into place -->
+	<row_alt x="40" y="403" width="552" height="24" stretch="1"><texture r="31" g="36" b="29" a="255">spr_white</texture></row_alt>
+	<row_kind x="46" y="406" width="62" height="18">
+		<text font="letterica16" r="170" g="178" b="156" a="255" align="l" vert_align="c"></text>
+	</row_kind>
+	<row_text x="114" y="406" width="176" height="18">
+		<text font="letterica16" r="214" g="220" b="198" a="255" align="l" vert_align="c"></text>
 	</row_text>
-	<row_play x="622" y="280" width="72" height="26" stretch="1" check_mode="0">
-		<text font="letterica16">Play</text>
-		<texture>ui_button_ordinary</texture>
+	<row_sub x="294" y="406" width="172" height="18">
+		<text font="letterica16" r="120" g="128" b="108" a="255" align="l" vert_align="c"></text>
+	</row_sub>
+	<row_play x="470" y="404" width="52" height="22" stretch="1" check_mode="0">
+		<text font="letterica16">PLAY</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_52x22</texture>
 	</row_play>
-	<row_queue x="700" y="280" width="72" height="26" stretch="1" check_mode="0">
-		<text font="letterica16">Queue</text>
-		<texture>ui_button_ordinary</texture>
+	<row_queue x="526" y="404" width="62" height="22" stretch="1" check_mode="0">
+		<text font="letterica16">QUEUE</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_62x22</texture>
 	</row_queue>
+	<!-- instead of the list while the daemon is not running -->
+	<help_1 x="46" y="409" width="540" height="22">
+		<text font="letterica18" r="214" g="220" b="198" a="255" align="l" vert_align="c">The radio daemon is not running.</text>
+	</help_1>
+	<help_2 x="46" y="441" width="540" height="18">
+		<text font="letterica16" r="170" g="178" b="156" a="255" align="l" vert_align="c">1. Start run.bat and leave its window open.</text>
+	</help_2>
+	<help_3 x="46" y="465" width="540" height="18">
+		<text font="letterica16" r="170" g="178" b="156" a="255" align="l" vert_align="c">2. This tab finds it by itself within a few seconds.</text>
+	</help_3>
+	<!-- up next: what plays after the current track; X takes a song out (YouTube only: Spotify's API cannot) -->
+	<next_edge x="604" y="365" width="180" height="335" stretch="1"><texture r="58" g="66" b="52" a="255">spr_white</texture></next_edge>
+	<next x="605" y="366" width="178" height="333" stretch="1"><texture r="26" g="30" b="24" a="255">spr_white</texture></next>
+	<next_caption x="614" y="370" width="160" height="22">
+		<text font="letterica18" r="120" g="128" b="108" a="255" align="l" vert_align="c">UP NEXT</text>
+	</next_caption>
+	<next_line x="614" y="397" width="160" height="1" stretch="1"><texture r="58" g="66" b="52" a="255">spr_white</texture></next_line>
+	<!-- row templates, 26 px apart like the results -->
+	<next_text x="614" y="406" width="124" height="18">
+		<text font="letterica16" r="170" g="178" b="156" a="255" align="l" vert_align="c"></text>
+	</next_text>
+	<next_rm x="742" y="404" width="32" height="22" stretch="1" check_mode="0">
+		<text font="letterica16">X</text>
+		<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+		<texture>spr_btn_32x22</texture>
+	</next_rm>
 
 	<!-- ============================ search dialog ============================ -->
-	<search x="352" y="320" width="320" height="112" stretch="1">
-		<background x="0" y="0" width="320" height="112" stretch="1">
-			<texture>ui_inGame2_message_box</texture>
-		</background>
-		<caption x="16" y="10" width="288" height="20">
-			<text font="letterica16" r="200" g="200" b="200" a="255" align="c" vert_align="c">Search Spotify</text>
+	<!-- its own window (the PDA eats keys); children are relative to it -->
+	<search x="190" y="327" width="440" height="156">
+		<background_edge x="0" y="0" width="440" height="156" stretch="1"><texture r="106" g="120" b="96" a="255">spr_white</texture></background_edge>
+		<background x="1" y="1" width="438" height="154" stretch="1"><texture r="26" g="30" b="24" a="255">spr_white</texture></background>
+		<accent_spotify x="0" y="0" width="440" height="2" stretch="1"><texture r="29" g="185" b="84" a="255">spr_white</texture></accent_spotify>
+		<accent_youtube x="0" y="0" width="440" height="2" stretch="1"><texture r="228" g="52" b="38" a="255">spr_white</texture></accent_youtube>
+		<caption x="16" y="10" width="408" height="22">
+			<text font="letterica18" r="214" g="220" b="198" a="255" align="l" vert_align="c">Search Spotify</text>
 		</caption>
-		<input x="16" y="36" width="288" height="30" stretch="1">
-			<text x="4" font="letterica16" vert_align="c" align="l"/>
-			<texture>ui_inGame2_edit_box_2</texture>
+		<line x="16" y="38" width="408" height="1" stretch="1"><texture r="58" g="66" b="52" a="255">spr_white</texture></line>
+		<input x="16" y="52" width="408" height="30">
+			<text x="8" font="letterica18" r="214" g="220" b="198" a="255" vert_align="c" align="l"/>
+			<texture>spr_edit</texture>
 		</input>
-		<btn_ok x="84" y="76" width="72" height="28" stretch="1" check_mode="0">
-			<text font="letterica16">Search</text>
-			<texture>ui_button_ordinary</texture>
+		<hint x="16" y="88" width="408" height="18">
+			<text font="letterica16" r="120" g="128" b="108" a="255" align="l" vert_align="c">Artist, track, album or playlist</text>
+		</hint>
+		<btn_ok x="226" y="114" width="96" height="30" stretch="1" check_mode="0">
+			<text font="letterica16">SEARCH</text>
+			<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+			<texture>spr_btn_96x30</texture>
 		</btn_ok>
-		<btn_cancel x="164" y="76" width="72" height="28" stretch="1" check_mode="0">
-			<text font="letterica16">ui_inv_cancel</text>
-			<texture>ui_button_ordinary</texture>
+		<btn_cancel x="328" y="114" width="96" height="30" stretch="1" check_mode="0">
+			<text font="letterica16">CANCEL</text>
+			<text_color><e r="214" g="220" b="198"/><h r="240" g="244" b="230"/><t r="214" g="220" b="198"/><d r="88" g="95" b="79"/></text_color>
+			<texture>spr_btn_96x30</texture>
 		</btn_cancel>
 	</search>
 </w>

@@ -272,8 +272,8 @@ public sealed class SpotifySource : IAudioSource, IPlayer
     public void NoteHeard(string uri, double posMs) => _heard = new Heard(uri, posMs, DateTime.UtcNow);
 
     /// <summary>
-    /// The PDA's switch: Spotify becomes what the game hears and plays on, from what the game was
-    /// playing when the player switched away, if Spotify is still on that track.
+    /// The PDA's switch: Spotify becomes what the game hears, paused where the game was when the
+    /// player switched away (if Spotify is still on that track). Play carries on from there.
     /// </summary>
     public async Task SwitchInAsync(CancellationToken ct)
     {
@@ -289,10 +289,11 @@ public sealed class SpotifySource : IAudioSource, IPlayer
         if (resume is not null && resume.Uri == state.Uri)
             await _spotify.SeekAsync((int)resume.PosMs, ct);     // while still paused, so nothing old is heard
         await BecomeCurrentAsync(ct);
-        if (state.Uri.Length > 0) await _spotify.PlayAsync(ct);
+        // switching stops the music: moving playback here keeps it playing if it played elsewhere
+        if ((await _spotify.GetStateAsync(ct)).Status == "playing") await _spotify.PauseAsync(ct);
         Log.Info(resume is not null && resume.Uri == state.Uri
-            ? $"Game audio: Spotify carries on at {resume.PosMs / 1000:0} s, where the game was."
-            : "Game audio: Spotify carries on.");
+            ? $"Game audio: Spotify waits at {resume.PosMs / 1000:0} s, where the game was."
+            : "Game audio: Spotify waits.");
     }
 
     /// <summary>
@@ -563,6 +564,13 @@ public sealed class SpotifySource : IAudioSource, IPlayer
         return _spotify.PreviousAsync(ct);
     }
 
+    /// <summary>Like a track change: what arrives until librespot's gap is the old position.</summary>
+    public Task SeekAsync(int positionMs, CancellationToken ct)
+    {
+        ExpectChange();
+        return _spotify.SeekAsync(positionMs, ct);
+    }
+
     public Task SetVolumeAsync(int percent, CancellationToken ct) => _spotify.SetVolumeAsync(percent, ct);
     public Task SetShuffleAsync(bool on, CancellationToken ct) => _spotify.SetShuffleAsync(on, ct);
 
@@ -575,7 +583,18 @@ public sealed class SpotifySource : IAudioSource, IPlayer
         await _spotify.PlayUriAsync(uri, ct);
     }
 
+    /// <summary>A track picked from a list, with the list's tracks after it: Spotify plays nothing after a track played on its own.</summary>
+    public async Task PlayTracksAsync(IReadOnlyList<string> uris, CancellationToken ct)
+    {
+        if (!await BecomeCurrentAsync(ct)) ExpectChange();
+        await _spotify.PlayTracksAsync(uris, ct);
+    }
+
     public Task QueueAsync(string uri, CancellationToken ct) => _spotify.QueueAsync(uri, ct);
     public Task<List<SearchItem>> SearchAsync(string query, CancellationToken ct) => _spotify.SearchAsync(query, ct);
     public Task<List<SearchItem>> MyPlaylistsAsync(CancellationToken ct) => _spotify.MyPlaylistsAsync(ct);
+    public Task<List<SearchItem>> UpNextAsync(int max, CancellationToken ct) => _spotify.UpNextAsync(max, ct);
+
+    public Task RemoveUpNextAsync(int index, string uri, CancellationToken ct) =>
+        throw new SpotifyException("Spotify does not let apps take songs out of its queue");
 }

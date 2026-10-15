@@ -1,0 +1,49 @@
+<w>
+	<!-- Made by tools/make_ui_texture.py; edit that, not this. -->
+	<file name="ui\ui_spotify_radio">
+		<texture id="spr_white" x="1" y="1" width="8" height="8" />
+		<texture id="spr_btn_172x28_e" x="11" y="1" width="172" height="28" />
+		<texture id="spr_btn_172x28_h" x="185" y="1" width="172" height="28" />
+		<texture id="spr_btn_172x28_t" x="1" y="31" width="172" height="28" />
+		<texture id="spr_btn_172x28_d" x="175" y="31" width="172" height="28" />
+		<texture id="spr_btn_52x32_e" x="349" y="31" width="52" height="32" />
+		<texture id="spr_btn_52x32_h" x="403" y="31" width="52" height="32" />
+		<texture id="spr_btn_52x32_t" x="457" y="31" width="52" height="32" />
+		<texture id="spr_btn_52x32_d" x="1" y="65" width="52" height="32" />
+		<texture id="spr_btn_96x32_e" x="55" y="65" width="96" height="32" />
+		<texture id="spr_btn_96x32_h" x="153" y="65" width="96" height="32" />
+		<texture id="spr_btn_96x32_t" x="251" y="65" width="96" height="32" />
+		<texture id="spr_btn_96x32_d" x="349" y="65" width="96" height="32" />
+		<texture id="spr_btn_64x32_e" x="447" y="65" width="64" height="32" />
+		<texture id="spr_btn_64x32_h" x="1" y="99" width="64" height="32" />
+		<texture id="spr_btn_64x32_t" x="67" y="99" width="64" height="32" />
+		<texture id="spr_btn_64x32_d" x="133" y="99" width="64" height="32" />
+		<texture id="spr_btn_106x32_e" x="199" y="99" width="106" height="32" />
+		<texture id="spr_btn_106x32_h" x="307" y="99" width="106" height="32" />
+		<texture id="spr_btn_106x32_t" x="1" y="133" width="106" height="32" />
+		<texture id="spr_btn_106x32_d" x="109" y="133" width="106" height="32" />
+		<texture id="spr_btn_62x24_e" x="217" y="133" width="62" height="24" />
+		<texture id="spr_btn_62x24_h" x="281" y="133" width="62" height="24" />
+		<texture id="spr_btn_62x24_t" x="345" y="133" width="62" height="24" />
+		<texture id="spr_btn_62x24_d" x="409" y="133" width="62" height="24" />
+		<texture id="spr_btn_52x22_e" x="1" y="167" width="52" height="22" />
+		<texture id="spr_btn_52x22_h" x="55" y="167" width="52" height="22" />
+		<texture id="spr_btn_52x22_t" x="109" y="167" width="52" height="22" />
+		<texture id="spr_btn_52x22_d" x="163" y="167" width="52" height="22" />
+		<texture id="spr_btn_62x22_e" x="217" y="167" width="62" height="22" />
+		<texture id="spr_btn_62x22_h" x="281" y="167" width="62" height="22" />
+		<texture id="spr_btn_62x22_t" x="345" y="167" width="62" height="22" />
+		<texture id="spr_btn_62x22_d" x="409" y="167" width="62" height="22" />
+		<texture id="spr_btn_96x30_e" x="1" y="191" width="96" height="30" />
+		<texture id="spr_btn_96x30_h" x="99" y="191" width="96" height="30" />
+		<texture id="spr_btn_96x30_t" x="197" y="191" width="96" height="30" />
+		<texture id="spr_btn_96x30_d" x="295" y="191" width="96" height="30" />
+		<texture id="spr_btn_32x22_e" x="393" y="191" width="32" height="22" />
+		<texture id="spr_btn_32x22_h" x="427" y="191" width="32" height="22" />
+		<texture id="spr_btn_32x22_t" x="461" y="191" width="32" height="22" />
+		<texture id="spr_btn_32x22_d" x="1" y="223" width="32" height="22" />
+		<texture id="spr_edit_b" x="35" y="223" width="2" height="30" />
+		<texture id="spr_edit_back" x="39" y="223" width="4" height="30" />
+		<texture id="spr_edit_e" x="45" y="223" width="2" height="30" />
+	</file>
+</w>

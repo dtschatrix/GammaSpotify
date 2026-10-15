@@ -110,8 +110,16 @@ public interface IPlayer
     Task PreviousAsync(CancellationToken ct);
     Task SetVolumeAsync(int percent, CancellationToken ct);
     Task SetShuffleAsync(bool on, CancellationToken ct);
+    /// <summary>Jumps to <paramref name="positionMs"/> in the current track; a pause stays a pause.</summary>
+    Task SeekAsync(int positionMs, CancellationToken ct);
     Task PlayUriAsync(string uri, CancellationToken ct);
     Task QueueAsync(string uri, CancellationToken ct);
     Task<List<SearchItem>> SearchAsync(string query, CancellationToken ct);
     Task<List<SearchItem>> MyPlaylistsAsync(CancellationToken ct);
+
+    /// <summary>What plays after the current track, in order, up to <paramref name="max"/>.</summary>
+    Task<List<SearchItem>> UpNextAsync(int max, CancellationToken ct);
+
+    /// <summary>Takes entry <paramref name="index"/> of <see cref="UpNextAsync"/> out, if it is still <paramref name="uri"/>.</summary>
+    Task RemoveUpNextAsync(int index, string uri, CancellationToken ct);
 }

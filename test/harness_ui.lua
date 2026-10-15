@@ -12,6 +12,7 @@ EFF = 0.3
 function get_console() return { get_float = function(_, name) assert(name == "snd_volume_eff"); return EFF end } end
 snd_type = { world_ambient = 134217856 }
 function printf(fmt, ...) print(string.format(fmt, ...)) end
+function GetARGB(a, r, g, b) return ((a * 256 + r) * 256 + g) * 256 + b end
 DIK_keys = { DIK_ESCAPE = 1 }
 db = { actor = {} }
 actor_menu = { set_msg = function(_, msg) print("HUD> " .. msg) end }
@@ -148,12 +149,18 @@ end
 
 local function control(kind, node)
 	local c = { kind = kind, node = node, shown = true, text = "" }
-	local tc = { SetText = function(_, t) assert(type(t) == "string", "SetText needs a string"); c.text = t end, GetText = function() return c.text end }
+	local tc = { SetText = function(_, t) assert(type(t) == "string", "SetText needs a string"); c.text = t end, GetText = function() return c.text end,
+	             SetTextColor = function(_, col) assert(type(col) == "number"); c.colour = col end, SetElipsis = function(_, b) assert(type(b) == "boolean") end }
 	function c:TextControl() return tc end
 	function c:Show(b) assert(type(b) == "boolean", "Show needs a boolean"); self.shown = b end
 	function c:SetWndPos(v) assert(v.x and v.y); self.pos = v end
 	function c:SetText(t) self.text = t end
 	function c:GetText() return self.text end
+	-- the slider (CUITrackBar, integer mode): the player's hand is played by setting the value directly
+	c.ival = 0
+	function c:SetOptIBounds(lo, hi) assert(type(lo) == "number" and type(hi) == "number"); self.imin, self.imax = lo, hi end
+	function c:SetIValue(v) assert(type(v) == "number"); self.ival = math.floor(v) end
+	function c:GetIValue() return self.ival end
 	function c:CaptureFocus(b)
 		if b then
 			local o = self._owner
@@ -171,7 +178,7 @@ end
 function CScriptXmlInit()
 	local x = {}
 	function x:ParseFile(f) assert(f == "ui_spotify_radio.xml") end
-	for _, m in ipairs({ "InitStatic", "InitFrame", "Init3tButton", "InitEditBox" }) do
+	for _, m in ipairs({ "InitStatic", "InitFrame", "Init3tButton", "InitEditBox", "InitTrackBar" }) do
 		x[m] = function(_, node, parent) assert(nodes[node], "XML node missing: " .. node); assert(parent, "no parent for " .. node); return control(m, node) end
 	end
 	return x
@@ -236,6 +243,8 @@ local function run(ms)
 end
 local function click(wnd, name) assert(wnd._cb[name .. ui_events.BUTTON_CLICKED], "no click handler: " .. name)() end
 local fails = 0
+local function shows() return tab.np_state:GetText() .. " | " .. tab.np_time:GetText() .. " | " .. tab.np_vol:GetText() .. " | " .. tab.np_device:GetText() .. " | " .. shows() end
+local function row(i) return tab.rows[i].kind:GetText() .. " | " .. tab.rows[i].text:GetText() .. " | " .. tab.rows[i].sub:GetText() end
 local function check(cond, what) print((cond and "PASS " or "FAIL ") .. what); if not cond then fails = fails + 1 end end
 
 check(pda.set_active_subdialog("eptTasks") == "vanilla:eptTasks", "other PDA tabs untouched")
@@ -252,15 +261,15 @@ run(700)
 for _, f in ipairs(cbs.actor_on_first_update or {}) do f() end   -- as on loading a save
 check(radio.is_connected(), "opening the tab connects via " .. radio.link_mode)
 check(radio.link_mode == (arg[2] or "file"), "link mode")
-print("   now: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText() .. " | " .. tab.list_title:GetText())
+print("   now: " .. tab.now_playing:GetText() .. " | " .. shows() .. " | " .. tab.list_title:GetText())
 check(tab.btn_play.shown and not tab.btn_pause.shown, "play button visible while idle")
 check(not tab.rows[1].st.shown and not tab.btn_page_next.shown, "rows hidden before any search")
 
 click(tab, "btn_play"); run(1500)
 check(tab.now_playing:GetText() == "Burial - Archangel", "now playing: " .. tab.now_playing:GetText())
 check(tab.btn_pause.shown and not tab.btn_play.shown, "pause button visible while playing")
-print("   status: " .. tab.status:GetText())
-check(tab.status:GetText():find("0:1%d / 3:58") and tab.status:GetText():find("vol 50%%"), "status line has time and volume")
+print("   status: " .. shows())
+check(tab.np_time:GetText():find("^00:1%d / 03:58$") and tab.np_vol:GetText() == "VOL 50%", "the PDA shows the time and the volume: " .. shows())
 
 click(tab, "btn_search")
 local dlg; for i = 1, 10 do local n, v = debug.getupvalue(ui_mod.open_search, i); if n == "SEARCH" then dlg = v end end
@@ -268,30 +277,31 @@ check(dlg and dlg:IsShown(), "search dialog opens")
 dlg.input:SetText("  burial untrue ")
 dlg._cb["fld_input" .. ui_events.EDIT_TEXT_COMMIT](); run(800)
 check(not dlg:IsShown(), "enter closes the dialog")
-check(tab.rows[1].st.shown and tab.rows[1].text:GetText() == "[track] Archangel - Burial", "row 1: " .. tab.rows[1].text:GetText())
-check(tab.rows[3].text:GetText() == "[playlist] Dark Ambient - someone" and not tab.rows[3].queue.shown and tab.rows[3].play.shown, "playlist row has play but no queue")
+check(tab.rows[1].st.shown and row(1) == "TRACK | Archangel | Burial", "row 1: " .. row(1))
+check(row(3) == "PLAYLIST | Dark Ambient | someone" and not tab.rows[3].queue.shown and tab.rows[3].play.shown, "playlist row has play but no queue: " .. row(3))
 check(tab.rows[1].queue.shown and not tab.rows[5].st.shown, "track row has queue; unused rows hidden")
-check(tab.list_title:GetText() == "burial untrue  (4)", "list title: " .. tab.list_title:GetText())
-check(tab.rows[2].st.pos.y == 278 + 38 and tab.rows[2].play.pos.x == 622, "rows are laid out")
+check(tab.list_title:GetText() == "burial untrue (4)", "list title: " .. tab.list_title:GetText())
+check(tab.rows[2].st.pos.y == 406 + 26 and tab.rows[2].play.pos.x == 470 and tab.rows[2].alt.shown and not tab.rows[1].alt.shown
+	and tab.next_rows[2].st.pos.x == 614 and tab.next_rows[2].rm.pos.y == 404 + 26, "rows are laid out, every second one shaded")
 
 click(tab, "row_play_2"); run(1500)
 check(radio.state.uri == "spotify:track:2", "row play starts that track")
 click(tab, "row_queue_1"); click(tab, "btn_shuffle"); click(tab, "btn_vol_down"); run(1500)
-check(radio.state.shuffle == true and radio.state.volume == 40, "shuffle + volume buttons: " .. tab.status:GetText())
+check(radio.state.shuffle == true and radio.state.volume == 40, "shuffle + volume buttons: " .. shows())
 click(tab, "btn_next"); click(tab, "btn_pause"); run(1500)
-check(radio.state.status == "paused" and tab.status:GetText():find("paused"), "pause")
+check(radio.state.status == "paused" and tab.np_state:GetText() == "|| PAUSED", "pause: " .. shows())
 click(tab, "btn_playlists"); run(800)
-check(tab.rows[1].text:GetText() == "[playlist] Zone walk - me" and not tab.rows[2].st.shown, "my playlists listed")
+check(row(1) == "PLAYLIST | Zone walk | me" and tab.list_title:GetText() == "MY PLAYLISTS (1)" and not tab.rows[2].st.shown, "my playlists listed: " .. tab.list_title:GetText())
 
 -- search confirmed with the button (focus stays in the box), then opened again
 click(tab, "btn_search"); dlg.input:SetText("untrue"); click(dlg, "btn_ok"); run(800)
-check(not dlg:IsShown() and tab.list_title:GetText() == "untrue  (4)", "search via the button works")
+check(not dlg:IsShown() and tab.list_title:GetText() == "untrue (4)", "search via the button works")
 click(tab, "btn_search")
 check(dlg:IsShown(), "search dialog opens again after a button-confirmed search")
 click(dlg, "btn_cancel"); click(tab, "btn_search")
 check(dlg:IsShown(), "and after cancel")
 dlg.input:SetText("burial"); dlg._cb["fld_input" .. ui_events.EDIT_TEXT_COMMIT](); run(800)
-check(not dlg:IsShown() and tab.list_title:GetText() == "burial  (4)", "enter still searches")
+check(not dlg:IsShown() and tab.list_title:GetText() == "burial (4)", "enter still searches")
 
 radio.search("\202\232\237\238 abc"); run(800)   -- "Кино abc" as cp1251 bytes, the way the game sends it
 local q = io.popen("curl -s http://127.0.0.1:47900/_query"):read("*a")
@@ -403,7 +413,7 @@ check(api("/_state"):find('"device": "pda"'), "and Spotify was moved to the game
 check(shipped.set_mode("world") == "head", "as shipped world mode cannot be selected")
 run(5000)
 check(shipped.lag_ms() >= 4000 and shipped.lag_ms() <= 9000, "about six seconds of audio are held: " .. shipped.lag_ms() .. " ms")
-check(radio.shown.heard and tab.now_playing:GetText() ~= "Nothing playing", "the PDA shows the track and time of what is heard: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText())
+check(radio.shown.heard and tab.now_playing:GetText() ~= "-- nothing playing --", "the PDA shows the track and time of what is heard: " .. tab.now_playing:GetText() .. " | " .. shows())
 sample("start")
 
 -- volume buttons: the sound's own volume, at once; Spotify's volume is left alone
@@ -411,7 +421,7 @@ local vol0 = spotify("vol")
 click(tab, "btn_vol_down")
 check(math.abs(newest().volume - 0.9) < 0.001, "volume down changes the playing sound in the same frame: " .. newest().volume)
 run(600)
-check(tab.status:GetText():find("vol 90%%") and spotify("vol") == vol0, "the PDA shows it and Spotify's own volume is untouched: " .. tab.status:GetText())
+check(tab.np_vol:GetText() == "VOL 90%" and spotify("vol") == vol0, "the PDA shows it and Spotify's own volume is untouched: " .. shows())
 
 -- pause and play in the PDA
 local s1 = newest(); local at = heard_chunk(s1)
@@ -437,8 +447,24 @@ check(s1.stopped, "next in the PDA stops the old track in the same frame")
 s2, took = next_sound(s1, 8000)
 check(s2 and took < 3.5, string.format("the new track is heard %.1f s later", took))
 run(2500)
-check(tab.now_playing:GetText() ~= title and radio.shown.heard and radio.shown_position() < 7000, "and the PDA shows it from its start: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText())
+check(tab.now_playing:GetText() ~= title and radio.shown.heard and radio.shown_position() < 7000, "and the PDA shows it from its start: " .. tab.now_playing:GetText() .. " | " .. shows())
 sample("after next")
+
+-- the seek slider follows what is heard; moved and let go, the music jumps there
+local seek_dur = radio.shown.duration
+check(tab.seek_bar.shown and tab.seek_bar.kind == "InitTrackBar" and math.abs(tab.seek_bar:GetIValue() / 1000 * seek_dur - radio.shown_position()) < 1500,
+	string.format("the seek slider shows where the track is: %d/1000 at %.1f s of %.0f s", tab.seek_bar:GetIValue(), radio.shown_position() / 1000, seek_dur / 1000))
+s1 = newest(); tab.seek_bar:SetIValue(tab.seek_bar:GetIValue() + 3); run(800)
+check(newest() == s1 and not s1.stopped, "a nudge of the slider (a turn of the mouse wheel over it) does nothing")
+local seek_target = math.floor(seek_dur / 2)
+tab.seek_bar:SetIValue(500); tab:Refresh()
+check(tab.np_time:GetText():find("^" .. string.format("%02d:%02d", math.floor(seek_target / 60000), math.floor(seek_target / 1000) % 60)),
+	"while it is moved the PDA shows where it would jump: " .. shows())
+check(wait_for(function() return s1.stopped end, 1500), "let go, the sound stops at once")
+s2, took = next_sound(s1, 8000); run(2500)
+local seek_off = radio.shown_position() - 2500 - seek_target
+check(s2 and took < 2 and math.abs(seek_off) < 1500, string.format("and the track plays on from there %.1f s later (%+.1f s): %s", took, seek_off / 1000, shows()))
+sample("after a seek in the PDA")
 
 -- the same things done from another Spotify app
 s1 = newest(); t0 = socket.gettime(); phone("pause")
@@ -454,7 +480,7 @@ s1 = newest(); t0 = socket.gettime(); phone("next")
 check(wait_for(function() return s1.stopped end, 4000), string.format("skipped from the phone: the old track stops %.1f s later", socket.gettime() - t0))
 s2, took = next_sound(s1, 8000)
 run(2500)
-check(s2 and tab.now_playing:GetText() ~= title and radio.shown_position() < 9000, string.format("and the new one is heard %.1f s after that: %s | %s", took, tab.now_playing:GetText(), tab.status:GetText()))
+check(s2 and tab.now_playing:GetText() ~= title and radio.shown_position() < 9000, string.format("and the new one is heard %.1f s after that: %s | %s", took, tab.now_playing:GetText(), shows()))
 sample("after phone next")
 
 -- a track ending by itself: Spotify moves on while the game still plays the end of the old one
@@ -462,14 +488,14 @@ local dur = spotify("idx") == "0" and 238000 or 200000
 s1 = newest(); phone("seek", dur - 13000)
 s2 = next_sound(s1, 8000)
 run(2500)
-check(s2 and radio.shown_position() >= dur - 13000 and radio.shown_position() <= dur - 6000, "a seek from the phone is followed: " .. tab.status:GetText())
+check(s2 and radio.shown_position() >= dur - 13000 and radio.shown_position() <= dur - 6000, "a seek from the phone is followed: " .. shows())
 sample("after seek")
 title = tab.now_playing:GetText()
 check(wait_for(function() return spotify("progress") + 0 < 10000 end, 15000), "Spotify reaches the next track")
 local behind = dur - radio.shown_position()
 check(tab.now_playing:GetText() == title and behind > 2000, string.format("while the PDA still shows the old one, %.1f s from its end", behind / 1000))
 check(wait_for(function() return tab.now_playing:GetText() ~= title end, 12000), "the PDA changes over when the new track is heard: " .. tab.now_playing:GetText())
-check(radio.shown_position() < 2500, "with its time starting near zero: " .. tab.status:GetText())
+check(radio.shown_position() < 2500, "with its time starting near zero: " .. shows())
 check(newest() == s2 and s2:playing() and gapless(s2), "and the sound was not interrupted")
 run(2000); sample("after track end")
 
@@ -525,23 +551,26 @@ if os.getenv("SPOTIFY_RADIO_YTDLP") then
 	check(stopped and tab.title_youtube.shown and not tab.title_spotify.shown and tab.btn_to_spotify.shown and not tab.btn_to_youtube.shown,
 		"SW: switching to YouTube stops the music in the same frame and the PDA says YouTube at once")
 	run(2200)
-	check(spotify("playing") == "false" and newest() == y1 and tab.now_playing:GetText() == "Nothing playing" and not tab.btn_playlists.shown,
-		"SW: Spotify is paused, YouTube has nothing yet, and there is no My playlists: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText())
+	check(spotify("playing") == "false" and newest() == y1 and tab.now_playing:GetText() == "-- nothing playing --" and not tab.btn_playlists.shown,
+		"SW: Spotify is paused, YouTube has nothing yet, and there is no My playlists: " .. tab.now_playing:GetText() .. " | " .. shows())
+	check(#radio.results == 0 and not tab.rows[1].st.shown and tab.list_title:GetText() == "Search YouTube Music",
+		"SW: and the Spotify results are gone from the list: " .. tab.list_title:GetText())
 	click(tab, "btn_search")
 	check(dlg:IsShown() and dlg.caption:GetText() == "Search YouTube Music", "SW: the search box says YouTube Music: " .. dlg.caption:GetText())
 	dlg.input:SetText("creep"); dlg._cb["fld_input" .. ui_events.EDIT_TEXT_COMMIT](); run(1500)
-	check(tab.rows[1].text:GetText() == "[track] Creep - Radiohead (3:59)" and tab.rows[4].text:GetText():find("^%[album%] OK Computer")
-		and tab.rows[5].text:GetText():find("^%[playlist%] Fake Mix") and not tab.rows[4].queue.shown,
-		"SW: and the search goes there, no prefix needed: songs, albums and playlists: " .. tab.rows[1].text:GetText() .. " | " .. tab.rows[4].text:GetText() .. " | " .. tab.rows[5].text:GetText())
+	check(row(1) == "TRACK | Creep | Radiohead (3:59)" and row(4):find("^ALBUM | OK Computer") and row(5):find("^PLAYLIST | Fake Mix") and not tab.rows[4].queue.shown,
+		"SW: and the search goes there, no prefix needed: songs, albums and playlists: " .. row(1) .. " / " .. row(4) .. " / " .. row(5))
 	click(tab, "row_play_1")
 	check(y1.stopped, "YT: playing a result stops what was playing in the same frame")
 	y2, took = next_sound(y1, 12000)
 	check(y2 and took < 4, string.format("YT: the track is heard %.1f s after the click (the lookup takes 1.2 s here)", took))
 	run(2500)
-	check(yt() == "vid00000001" and tab.now_playing:GetText() == "Radiohead - Creep" and radio.shown_position() < 7000 and tab.status:GetText():find("YouTube"),
-		"YT: the PDA shows it from its start: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText())
+	check(yt() == "vid00000001" and tab.now_playing:GetText() == "Radiohead - Creep" and radio.shown_position() < 7000 and tab.np_device:GetText():find("YouTube"),
+		"YT: the PDA shows it from its start: " .. tab.now_playing:GetText() .. " | " .. shows())
 	check(spotify("playing") == "false", "YT: Spotify was paused")
 	click(tab, "row_queue_2"); run(1500)                 -- Karma Police comes next
+	check(wait_for(function() return tab.next_rows[1].text:GetText() == "1. Karma Police" end, 6000) and tab.next_rows[1].rm.shown,
+		"UP: the up-next column lists the queued track first, with X on YouTube: " .. tab.next_rows[1].text:GetText())
 
 	-- pause and play
 	y1 = newest(); at = heard_chunk(y1)
@@ -563,7 +592,20 @@ if os.getenv("SPOTIFY_RADIO_YTDLP") then
 	check(y2 and took < 1.5 and chunk_no(y2.parts[1]) - at >= 0 and chunk_no(y2.parts[1]) - at <= 1,
 		string.format("YT: after a 7 s game pause it continues %.1f s later from where it stopped", took))
 	run(1500)
-	check(yt() == "vid00000001" and radio.shown_position() > 5000 and radio.shown_position() < 16000, "YT: and the PDA time went on from there: " .. tab.status:GetText())
+	check(yt() == "vid00000001" and radio.shown_position() > 5000 and radio.shown_position() < 16000, "YT: and the PDA time went on from there: " .. shows())
+
+	-- the slider on YouTube, while paused: the time jumps and it stays paused; play goes on from there
+	y1 = newest(); click(tab, "btn_pause"); run(1000)
+	tab.seek_bar:SetIValue(600)                                     -- 24 s of the 40 s track
+	check(wait_for(function() return radio.shown_position() > 23500 and radio.shown_position() < 24500 end, 2500) and tab.btn_play.shown and newest() == y1,
+		"YT: the slider moved while paused: the time jumps and it stays paused: " .. shows())
+	run(1500)
+	check(newest() == y1 and radio.shown.status == "paused", "YT: and nothing plays: " .. shows())
+	click(tab, "btn_play")
+	y2, took = next_sound(y1, 6000); run(2500)
+	check(y2 and took < 2 and yt() == "vid00000001" and math.abs(radio.shown_position() - 2500 - 24000) < 1500,
+		string.format("YT: play goes on from there %.1f s later: %s", took, shows()))
+	sample("after a seek on YouTube")
 
 	-- next plays the queued track, looked up while the first one played; previous goes back
 	y1 = newest(); click(tab, "btn_next")
@@ -574,21 +616,31 @@ if os.getenv("SPOTIFY_RADIO_YTDLP") then
 	y2, took = next_sound(y1, 8000); run(2500)
 	check(y2 and yt() == "vid00000001", "YT: previous goes back to the track before: " .. tab.now_playing:GetText())
 
-	-- switching back and forth: each source carries on from what the game was playing when it was left
+	-- switching back and forth: the music stops, and the source switched to waits, paused where the
+	-- game was when it was left; play carries on from there
 	local yt_pos = radio.shown_position()
 	y1 = newest(); click(tab, "btn_to_spotify")
 	stopped = y1.stopped
+	run(2500)
+	check(stopped and newest() == y1 and spotify("playing") == "false" and radio.shown.uri == sp_uri and tab.btn_play.shown
+		and tab.title_spotify.shown and tab.btn_to_youtube.shown and tab.btn_playlists.shown,
+		"SW: switching to Spotify stops the music in the same frame; Spotify waits, paused: " .. tab.now_playing:GetText() .. " | " .. shows())
+	click(tab, "btn_play")
 	y2, took = next_sound(y1, 8000); run(3000)
-	check(stopped and tab.title_spotify.shown and tab.btn_to_youtube.shown and tab.btn_playlists.shown, "SW: switching to Spotify stops YouTube in the same frame, and the PDA says Spotify")
 	local off = radio.shown_position() - 3000 - sp_pos
-	check(y2 and took < 3 and radio.shown.uri == sp_uri and spotify("playing") == "true" and math.abs(off) < 1500,
-		string.format("SW: Spotify plays on %.1f s later, from where it was left (%+.1f s): %s | %s", took, off / 1000, tab.now_playing:GetText(), tab.status:GetText()))
+	check(y2 and took < 3 and spotify("playing") == "true" and math.abs(off) < 1500,
+		string.format("SW: play goes on %.1f s later, from where Spotify was left (%+.1f s): %s | %s", took, off / 1000, tab.now_playing:GetText(), shows()))
 	sample("back on Spotify")
 	y1 = newest(); click(tab, "btn_to_youtube")
+	stopped = y1.stopped
+	run(1500)
+	check(stopped and newest() == y1 and spotify("playing") == "false" and yt() == "vid00000001" and tab.btn_play.shown,
+		"SW: switching to YouTube stops the music; its track waits, paused: " .. shows())
+	click(tab, "btn_play")
 	y2, took = next_sound(y1, 8000); run(3000)
 	off = radio.shown_position() - 3000 - yt_pos
-	check(y2 and took < 1 and yt() == "vid00000001" and spotify("playing") == "false" and math.abs(off) < 1500,
-		string.format("SW: back on YouTube the track goes on %.1f s later, from where it was left (%+.1f s): %s", took, off / 1000, tab.status:GetText()))
+	check(y2 and took < 1 and yt() == "vid00000001" and math.abs(off) < 1500,
+		string.format("SW: play goes on %.1f s later, from where YouTube was left (%+.1f s): %s", took, off / 1000, shows()))
 	sample("back on YouTube")
 
 	-- the list runs out: a radio of the last track plays on, without a break
@@ -596,7 +648,7 @@ if os.getenv("SPOTIFY_RADIO_YTDLP") then
 	check(yt() == "vid00000002", "YT: next once more: " .. tab.now_playing:GetText())
 	y1 = newest()
 	check(wait_for(function() return yt() == "vid00000003" end, 25000), "YT: when the list is over, a radio of its last track plays on: " .. tab.now_playing:GetText())
-	check(radio.shown_position() < 2500, "YT: from the start of its first track: " .. tab.status:GetText())
+	check(radio.shown_position() < 2500, "YT: from the start of its first track: " .. shows())
 	check(newest() == y1 and y1:playing() and gapless(y1), "YT: and the sound was not interrupted")
 
 	-- an album from the search
@@ -607,7 +659,7 @@ if os.getenv("SPOTIFY_RADIO_YTDLP") then
 	-- the stream is stopped and asked for again: YouTube waits, paused, until play
 	shipped.set_mode("off"); run(1500)
 	shipped.set_mode("head"); run(3000)
-	check(tab.btn_play.shown and yt() == "vid00000006", "YT: after the stream was stopped and asked for again it waits, paused: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText())
+	check(tab.btn_play.shown and yt() == "vid00000006", "YT: after the stream was stopped and asked for again it waits, paused: " .. tab.now_playing:GetText() .. " | " .. shows())
 	y1 = newest(); click(tab, "btn_play")
 	y2, took = next_sound(y1, 6000); run(2000)
 	check(y2 and y2:playing() and yt() == "vid00000006", string.format("YT: and play carries on %.1f s later", took))
@@ -619,9 +671,9 @@ if os.getenv("SPOTIFY_RADIO_YTDLP") then
 
 	-- a track that cannot be played
 	click(tab, "row_play_3")
-	check(wait_for(function() return tab.status:GetText():find("Video unavailable", 1, true) ~= nil end, 8000), "YT: a track that cannot be played says why in the PDA: " .. tab.status:GetText())
+	check(wait_for(function() return shows():find("Video unavailable", 1, true) ~= nil end, 8000), "YT: a track that cannot be played says why in the PDA: " .. shows())
 	run(1500)
-	check(tab.now_playing:GetText() == "Nothing playing", "YT: and nothing plays: " .. tab.now_playing:GetText())
+	check(tab.now_playing:GetText() == "-- nothing playing --", "YT: and nothing plays: " .. tab.now_playing:GetText())
 
 	-- a Spotify result (from a search made before switching) brings Spotify back, switch and all
 	wait_for(function() return not tab.status:GetText():find("^!") end, 8000)   -- the error has had its time
@@ -629,10 +681,10 @@ if os.getenv("SPOTIFY_RADIO_YTDLP") then
 	y2, took = next_sound(y1, 10000); run(3000)
 	check(y2 and radio.shown.uri == "spotify:track:2" and spotify("playing") == "true",
 		string.format("YT: a Spotify result brings Spotify back, heard %.1f s after the click: %s", took, tab.now_playing:GetText()))
-	check(not tab.status:GetText():find("YouTube") and tab.title_spotify.shown and tab.btn_to_youtube.shown,
-		"YT: the PDA no longer says YouTube and the switch is back on Spotify: " .. tab.status:GetText())
+	check(not tab.np_device:GetText():find("YouTube") and tab.title_spotify.shown and tab.btn_to_youtube.shown,
+		"YT: the PDA no longer says YouTube and the switch is back on Spotify: " .. shows())
 	radio.search("yt creep"); run(1500)
-	check(tab.rows[1].text:GetText() == "[track] Creep - Radiohead (3:59)", "YT: \"yt ...\" in the search box still searches YouTube Music: " .. tab.rows[1].text:GetText())
+	check(row(1) == "TRACK | Creep | Radiohead (3:59)", "YT: \"yt ...\" in the search box still searches YouTube Music: " .. row(1))
 	run(2000)
 end
 run(12000)
@@ -654,20 +706,20 @@ print("WORLD_PARTS " .. world_parts)
 -- paging with fake results
 radio.results = {}; for i = 1, 30 do radio.results[i] = { kind = "track", uri = "u" .. i, title = string.rep("T", 100) .. i, subtitle = "" } end
 radio.results_title = "many"; radio.results_version = radio.results_version + 1; run(400)
-check(tab.btn_page_next.shown and tab.list_title:GetText() == "many  (30)  page 1/3", "paging title: " .. tab.list_title:GetText())
-check(#tab.rows[1].text:GetText() == 70, "long titles are cut")
+check(tab.btn_page_next.shown and tab.list_title:GetText() == "many (30)  page 1/3", "paging title: " .. tab.list_title:GetText())
+check(#tab.rows[1].text:GetText() == 26, "long titles are cut")
 click(tab, "btn_page_next"); click(tab, "btn_page_next"); click(tab, "btn_page_next")
 check(tab.page == 3 and tab.rows[8].st.shown and not tab.rows[9].st.shown, "last page shows 8 rows")
 click(tab, "btn_page_prev"); check(tab.page == 2, "page back")
 radio.send("bogus"); run(500)
-check(tab.status:GetText() == "! Unknown command: bogus", "error shown in tab: " .. tab.status:GetText())
+check(tab.status:GetText() == "! Unknown command: bogus", "error shown in tab: " .. shows())
 if radio.link_mode == "file" then
 	os.execute("pkill -f SpotifyRadio.dll"); run(13500)
-	check(not radio.is_connected() and tab.now_playing:GetText() == "Not connected", "daemon death is noticed: " .. tab.status:GetText())
+	check(not radio.is_connected() and tab.now_playing:GetText() == "-- radio daemon not running --", "daemon death is noticed: " .. shows())
 	click(tab, "btn_next"); run(300)
 	check(tab.status:GetText() == "! Daemon is not running - start run.bat", "click while down explains itself")
 	os.execute("dotnet ../daemon/bin/Release/net7.0/SpotifyRadio.dll > daemon3.log 2>&1 &"); run(8000)
-	check(radio.is_connected() and tab.now_playing:GetText() ~= "Not connected", "daemon restart is picked up without replaying old clicks: " .. tab.now_playing:GetText())
+	check(radio.is_connected() and tab.now_playing:GetText() ~= "-- radio daemon not running --", "daemon restart is picked up without replaying old clicks: " .. tab.now_playing:GetText())
 	check(not io.open("daemon3.log"):read("*a"):find("<- next"), "stale commands are not replayed")
 end
 local dlog = io.open("daemon_" .. (arg[2] or "file") .. ".log"):read("*a")

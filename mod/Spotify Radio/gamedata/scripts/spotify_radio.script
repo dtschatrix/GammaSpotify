@@ -15,6 +15,7 @@
 		spotify_radio.search("burial")        -- results arrive in spotify_radio.results
 		spotify_radio.play_uri(uri)
 		spotify_radio.switch_source("youtube")  -- "spotify" / "youtube", when the daemon has both
+		spotify_radio.seek(90000)               -- ms into the current track
 		spotify_radio.subscribe(function(event, data) ... end)   -- "state" / "results" / "error"
 
 	The PDA screen lives in spotify_radio_ui.script.
@@ -57,16 +58,21 @@ shown = { status = "offline", artist = "", title = "", progress = 0, duration = 
 heard = function() return nil end -- replaced by spotify_radio_stream: track and position being heard
 local status_until = 0           -- a button was pressed: shown.status is ahead of Spotify until then
 local source_until = 0           -- the switch was flipped: shown.source is ahead of the daemon until then
+local seek_to, seek_at, seek_until = 0, 0, 0  -- a seek was asked for: the daemon's time may still be the old one
 
 results = {}                     -- last search / playlist listing: { {kind=, uri=, title=, subtitle=}, ... }
 results_title = ""
 results_version = 0              -- bumped whenever results change
+upnext = {}                      -- what plays after the current track, in order: { {kind=, uri=, title=, subtitle=}, ... }
+upnext_source = ""               -- whose list that is: spotify | youtube
+upnext_version = 0               -- bumped whenever it arrives
 last_error = ""
 last_error_at = 0                -- time_global() of the last error
 link_mode = "none"               -- none | file | socket (for display)
 
 local rx = ""
 local pending_results
+local pending_upnext
 local next_pump_at = 0
 local listeners = {}
 local key_to_action = {}
@@ -164,7 +170,8 @@ end
 local function go_offline(reason)
 	if state.status ~= "offline" then log("daemon link lost: " .. tostring(reason)) end
 	rx = ""
-	pending_results = nil
+	pending_results, pending_upnext = nil, nil
+	upnext, upnext_version = {}, upnext_version + 1
 	state.status = "offline"
 	shown.status = "offline"
 	notify("state", state)
@@ -177,6 +184,9 @@ local function on_state(f)
 	state.artist   = f[3] or ""
 	state.title    = f[4] or ""
 	state.progress = tonumber(f[5]) or 0
+	if time_global() < seek_until and math.abs(state.progress - seek_to) > 3000 then
+		state.progress = seek_to + (f[2] == "playing" and time_global() - seek_at or 0)   -- from before the seek
+	end
 	state.duration = tonumber(f[6]) or 0
 	state.volume   = tonumber(f[7]) or -1
 	state.device   = f[8] or ""
@@ -224,6 +234,15 @@ local function handle_line(line)
 		pending_results = nil
 		log(string.format("%d results for '%s'", #results, results_title))
 		notify("results", results)
+	elseif kind == "upnext_begin" then
+		pending_upnext = { source = f[2] or "", items = {} }
+	elseif kind == "upnext_item" and pending_upnext then
+		local items = pending_upnext.items
+		items[#items + 1] = { kind = f[3] or "", uri = f[4] or "", title = f[5] or "", subtitle = f[6] or "" }
+	elseif kind == "upnext_end" and pending_upnext then
+		upnext, upnext_source = pending_upnext.items, pending_upnext.source
+		upnext_version = upnext_version + 1
+		pending_upnext = nil
 	elseif kind == "hello" then
 		log("daemon says hello (protocol " .. tostring(f[3]) .. ")")
 	elseif kind ~= "pong" and kind ~= "ok" then
@@ -435,6 +454,32 @@ end
 
 function request_playlists()
 	return send("playlists")
+end
+
+-- Jumps to ms in the current track. The PDA shows the new time at once.
+function seek(ms)
+	ms = math.max(0, math.floor(ms))
+	if not send("seek " .. ms) then return false end
+	seek_to, seek_at, seek_until = ms, time_global(), time_global() + 2500
+	state.progress, state.received_at = ms, time_global()
+	shown.progress, shown.received_at, shown.heard = ms, time_global(), false
+	return true
+end
+
+-- Empties the list (the PDA shows its "Search ..." hint again).
+function clear_results()
+	results, results_title = {}, ""
+	results_version = results_version + 1
+end
+
+-- Asks what plays next (the answer fills spotify_radio.upnext). Never nags when the daemon is away.
+function request_upnext()
+	return tell("upnext")
+end
+
+-- Takes entry i (0-based) of the up-next list out; YouTube only, Spotify's API cannot.
+function unqueue(index, uri)
+	return send("unqueue " .. index .. " " .. tostring(uri))
 end
 
 -- The daemon has Spotify and YouTube, both able to play in the game.

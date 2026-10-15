@@ -395,7 +395,7 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
     /// YouTube becomes what the game hears. Returns at once; opening the stream takes a second or
     /// two and happens in the background. Called with _changeGate held.
     /// </summary>
-    private async Task StartAtPosAsync(double startMs, CancellationToken ct)
+    private async Task StartAtPosAsync(double startMs, CancellationToken ct, bool paused = false)
     {
         Item? item;
         Track? old, parked;
@@ -410,7 +410,7 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
             _parked = null;
             item = _pos >= 0 && _pos < _list.Count ? _list[_pos] : null;
             _shown = item;
-            _paused = false;
+            _paused = paused;
             cut = _outBytes;                     // everything handed out before this is the old track
             if (item is not null) AddBoundary(cut, item.Id, startMs);
             Wake();
@@ -519,6 +519,31 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
             if (seed.Length > 0 && !await AddRadioAsync(seed, ct)) throw new SpotifyException("YouTube: nothing to play after this one");
             lock (_sync) MoveTo(Math.Min(_pos + 1, _list.Count - 1));
             await StartAtPosAsync(0, ct);
+        }
+        finally { _changeGate.Release(); }
+    }
+
+    /// <summary>
+    /// Opens the track again at the position: ffmpeg reads from the start and drops what comes
+    /// before, a few tenths of a second for a song. A paused track stays paused there.
+    /// </summary>
+    public async Task SeekAsync(int positionMs, CancellationToken ct)
+    {
+        EnsurePlayable();
+        await _changeGate.WaitAsync(ct);
+        try
+        {
+            bool paused;
+            double at;
+            lock (_sync)
+            {
+                if (_pos < 0 || _pos >= _list.Count || _shown is null) return;
+                paused = _paused;
+                var length = Meta(_list[_pos].Id).DurationMs;
+                at = Math.Clamp(positionMs, 0, length > 1000 ? length - 1000 : int.MaxValue);
+            }
+            Log.Info($"YouTube: to {at / 1000:0} s.");
+            await StartAtPosAsync(at, ct, paused);
         }
         finally { _changeGate.Release(); }
     }
@@ -639,6 +664,37 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
 
     public Task<PlayerState> PollAsync(CancellationToken ct) => GetStateAsync(ct);
 
+    /// <summary>The list after the current track (or what was queued before anything played).</summary>
+    public Task<List<SearchItem>> UpNextAsync(int max, CancellationToken ct)
+    {
+        lock (_sync)
+        {
+            var next = _pos >= 0 ? _list.Skip(_pos + 1) : _queuedEarly;
+            return Task.FromResult(next.Take(max).Select(i => Meta(i.Id))
+                .Select(i => new SearchItem("track", VideoPrefix + i.Id, i.Title, i.Artist)).ToList());
+        }
+    }
+
+    public Task RemoveUpNextAsync(int index, string uri, CancellationToken ct)
+    {
+        bool next;
+        Item item;
+        lock (_sync)
+        {
+            var list = _pos >= 0 ? _list : _queuedEarly;
+            var at = _pos >= 0 ? _pos + 1 + index : index;
+            if (index < 0 || at >= list.Count || VideoPrefix + list[at].Id != uri)
+                throw new SpotifyException("YouTube: the list has just changed, try again");
+            item = list[at];
+            list.RemoveAt(at);
+            next = _pos >= 0 && at == _pos + 1;
+            if (_pos >= 0 && _insertAt > at) _insertAt--;
+        }
+        Log.Info($"YouTube: took {item.Title} out of the list.");
+        if (next) Prefetch();                    // another track is next now
+        return Task.CompletedTask;
+    }
+
     /// <summary>YouTube playlists of the player's own: not yet (they would need a YouTube login).</summary>
     public Task<List<SearchItem>> MyPlaylistsAsync(CancellationToken ct) => Task.FromResult(new List<SearchItem>());
 
@@ -713,8 +769,8 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
     }
 
     /// <summary>
-    /// The PDA's switch: YouTube becomes what the game hears and carries on with the parked track,
-    /// if there is one; otherwise the game goes quiet until something is chosen.
+    /// The PDA's switch: YouTube becomes what the game hears, with the parked track waiting, paused
+    /// where the game was; play carries on from there. Nothing parked: quiet until something is chosen.
     /// </summary>
     public async Task SwitchInAsync(CancellationToken ct)
     {
@@ -723,7 +779,7 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
         try
         {
             if (IsCurrent) return;
-            if (Audio.Streaming && await UnparkAsync(ct)) return;
+            if (Audio.Streaming && await UnparkAsync(ct, paused: true)) return;
             long cut;
             lock (_sync) cut = _outBytes;
             await Audio.StartOverAsync(this, "switched to YouTube", cut, ct);
@@ -731,8 +787,8 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
         finally { _changeGate.Release(); }
     }
 
-    /// <summary>The parked track plays on, from what the game was playing. Called with _changeGate held.</summary>
-    private async Task<bool> UnparkAsync(CancellationToken ct)
+    /// <summary>The parked track goes on (or waits, paused) from what the game was playing. Called with _changeGate held.</summary>
+    private async Task<bool> UnparkAsync(CancellationToken ct, bool paused = false)
     {
         Track? track;
         long cut;
@@ -752,11 +808,11 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
             track.ResumeAtMs = null;
             _track = track;
             _shown = track.Item;
-            _paused = false;
+            _paused = paused;
             AddBoundary(cut, track.Item.Id, track.PositionMs);
             Wake();
         }
-        Log.Info($"YouTube: {track.Item.Artist} - {track.Item.Title}, on from {track.PositionMs / 1000:0} s.");
+        Log.Info($"YouTube: {track.Item.Artist} - {track.Item.Title}, {(paused ? "waits at" : "on from")} {track.PositionMs / 1000:0} s.");
         return true;
     }
 
@@ -890,11 +946,12 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
 
     private bool Blocked => DateTime.UtcNow < _blockedUntilUtc;
 
-    private const string BlockedMessage = "YouTube: too many requests from this PC, it wants a sign-in. Wait about ten minutes";
+    // VPN exits are shared by many people, so YouTube often treats them as bots
+    private const string BlockedMessage = "YouTube: blocked for this connection (a VPN? turn it off). Asking again in 10 min";
 
     private void CheckBlocked()
     {
-        if (Blocked) throw new SpotifyException($"YouTube: still waiting out its request limit ({Math.Ceiling((_blockedUntilUtc - DateTime.UtcNow).TotalMinutes)} min)");
+        if (Blocked) throw new SpotifyException($"YouTube: blocked for this connection, asking again in {Math.Ceiling((_blockedUntilUtc - DateTime.UtcNow).TotalMinutes)} min (restart run.bat to ask now)");
     }
 
     private static bool IsBotCheck(string stderr) =>

@@ -1,6 +1,6 @@
 # Spotify Radio for S.T.A.L.K.E.R. Anomaly / GAMMA
 
-A Spotify player in the PDA's Radio tab: now playing, play / pause / next / previous, volume, shuffle, search, your playlists. The music is played by the game engine, not by the Spotify app.
+A Spotify player in the PDA's Radio tab: now playing, play / pause / next / previous, seek, volume, shuffle, search, your playlists, what plays next. The music is played by the game engine, not by the Spotify app.
 
 Two parts: a mod, installed with Mod Organizer 2, and a daemon, a console program that runs beside the game and talks to Spotify.
 
@@ -41,9 +41,10 @@ Keep the daemon running while you play. When a save is loaded the daemon window 
 
 Open the PDA's Radio tab.
 
-- Top right: previous, play / pause, next, volume, shuffle. Volume is that of the music in game; Spotify's own volume is left alone.
-- **Search**: type, press Enter. **Play** starts a result, **Queue** queues a track.
+- Under the track info: previous, play / pause, next, volume, shuffle. The slider seeks. Volume is that of the music in game; Spotify's own volume is left alone.
+- **Search**: type, press Enter. **Play** starts a result, **Queue** queues a track. A track plays with the tracks after it in the list, so next goes down the list.
 - **My playlists** lists your playlists.
+- Up next, on the right, lists the tracks that play after the current one.
 
 In Spotify the game appears as a device named "STALKER PDA". Playback moves to it when a save is loaded, playing or paused as it was.
 
@@ -60,18 +61,16 @@ Struck through means fixed; what it does now follows.
 - The game's own Radio tab is replaced.
 - Titles are transliterated to Latin letters by default (see `encoding`).
 - Search returns at most 10 results per type, which is Spotify's limit.
+- Up next is read-only on Spotify: the Web API cannot remove a track from Spotify's queue. On YouTube it can be edited.
 - No podcasts or local files.
 
 ## To do
 
 Planned:
 
-- Redesign the PDA screen.
 - More controls.
-- Seeking within a track.
 - Scrolling lists instead of pages; opening a playlist to see its tracks.
-- A queue you can see and edit.
-- "Start radio from this song".
+- "Start radio from this song" (YouTube only: Spotify's Web API no longer offers recommendations to new apps).
 
 Ideas, not decided:
 
