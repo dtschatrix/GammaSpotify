@@ -75,6 +75,25 @@ public interface IAudioSource
 
     /// <summary>The game is back and <see cref="PauseForAwayAsync"/> had paused the source.</summary>
     Task ResumeAfterAwayAsync(CancellationToken ct);
+
+    // ------------------------------------------------------------------ the PDA's source switch
+
+    /// <summary>
+    /// Comes just before the player switches away from this source (current only): the track the
+    /// game was playing (<paramref name="uri"/>) and where in it (ms). The source reads ahead of
+    /// what is heard, so this is where to carry on when it is switched back to.
+    /// </summary>
+    void NoteHeard(string uri, double posMs);
+
+    /// <summary>The player switched to this source: it becomes current and carries on with what it played last.</summary>
+    Task SwitchInAsync(CancellationToken ct);
+}
+
+/// <summary>What the game was playing when the player switched to another source (see <see cref="IAudioSource.NoteHeard"/>).</summary>
+public sealed record Heard(string Uri, double PosMs, DateTime Utc)
+{
+    /// <summary>Notes are used by the switch that follows at once; an old one means that switch failed.</summary>
+    public bool Fresh => DateTime.UtcNow - Utc < TimeSpan.FromSeconds(15);
 }
 
 /// <summary>What the PDA can ask of whatever is playing: the commands of the game link.</summary>

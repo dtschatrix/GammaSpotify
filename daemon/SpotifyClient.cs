@@ -216,6 +216,8 @@ public sealed class SpotifyClient
 
     public Task PlayAsync(CancellationToken ct) => PlayerCommandAsync(HttpMethod.Put, "/me/player/play", null, ct, ignoreRestriction: true);
     public Task PauseAsync(CancellationToken ct) => PlayerCommandAsync(HttpMethod.Put, "/me/player/pause", null, ct, ignoreRestriction: true);
+    public Task SeekAsync(int positionMs, CancellationToken ct) =>
+        PlayerCommandAsync(HttpMethod.Put, $"/me/player/seek?position_ms={Math.Max(0, positionMs)}", null, ct);
     public Task NextAsync(CancellationToken ct) => PlayerCommandAsync(HttpMethod.Post, "/me/player/next", null, ct);
     public Task PreviousAsync(CancellationToken ct) => PlayerCommandAsync(HttpMethod.Post, "/me/player/previous", null, ct);
 

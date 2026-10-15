@@ -6,6 +6,8 @@ public sealed class Config
 {
     /// <summary>What plays in the game: "spotify", "youtube" or both. Asked on the first run; remove it to be asked again.</summary>
     public string[]? Sources { get; set; }
+    /// <summary>The source the PDA's switch was left on ("spotify" or "youtube"); kept by the daemon.</summary>
+    public string LastSource { get; set; } = "";
     /// <summary>Client ID of your app at developer.spotify.com/dashboard (Spotify only).</summary>
     public string ClientId { get; set; } = "";
     /// <summary>Port the game connects to (must match PORT in spotify_radio.script).</summary>

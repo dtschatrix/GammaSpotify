@@ -510,16 +510,29 @@ EFF = 0.3
 s1 = next_sound(s2, 3000)
 check(s1, "volume back: playing again")
 
--- YouTube: "yt ..." in the search box, until the PDA has a source switch. fake_ytdlp.sh answers
--- after 1.2 s like a real lookup; ffmpeg decodes for real.
+-- YouTube, and the PDA's switch between the two. fake_ytdlp.sh answers after 1.2 s like a real
+-- lookup; ffmpeg decodes for real.
 if os.getenv("SPOTIFY_RADIO_YTDLP") then
 	local function yt() return radio.shown.uri:match("^yt:video:(.+)$") end
 	run(3000)
-	radio.search("yt creep"); run(1500)
+	check(tab.btn_to_youtube.shown and not tab.btn_to_spotify.shown and tab.title_spotify.shown and not tab.title_youtube.shown,
+		"SW: the PDA offers a switch to YouTube")
+	local sp_uri, sp_pos = radio.shown.uri, radio.shown_position()
+	local y1, y2 = newest(), nil
+	click(tab, "btn_to_youtube")
+	local stopped = y1.stopped
+	run(300)
+	check(stopped and tab.title_youtube.shown and not tab.title_spotify.shown and tab.btn_to_spotify.shown and not tab.btn_to_youtube.shown,
+		"SW: switching to YouTube stops the music in the same frame and the PDA says YouTube at once")
+	run(2200)
+	check(spotify("playing") == "false" and newest() == y1 and tab.now_playing:GetText() == "Nothing playing" and not tab.btn_playlists.shown,
+		"SW: Spotify is paused, YouTube has nothing yet, and there is no My playlists: " .. tab.now_playing:GetText() .. " | " .. tab.status:GetText())
+	click(tab, "btn_search")
+	check(dlg:IsShown() and dlg.caption:GetText() == "Search YouTube Music", "SW: the search box says YouTube Music: " .. dlg.caption:GetText())
+	dlg.input:SetText("creep"); dlg._cb["fld_input" .. ui_events.EDIT_TEXT_COMMIT](); run(1500)
 	check(tab.rows[1].text:GetText() == "[track] Creep - Radiohead (3:59)" and tab.rows[4].text:GetText():find("^%[album%] OK Computer")
 		and tab.rows[5].text:GetText():find("^%[playlist%] Fake Mix") and not tab.rows[4].queue.shown,
-		"YT: the search lists songs, albums and playlists: " .. tab.rows[1].text:GetText() .. " | " .. tab.rows[4].text:GetText() .. " | " .. tab.rows[5].text:GetText())
-	local y1, y2 = newest(), nil
+		"SW: and the search goes there, no prefix needed: songs, albums and playlists: " .. tab.rows[1].text:GetText() .. " | " .. tab.rows[4].text:GetText() .. " | " .. tab.rows[5].text:GetText())
 	click(tab, "row_play_1")
 	check(y1.stopped, "YT: playing a result stops what was playing in the same frame")
 	y2, took = next_sound(y1, 12000)
@@ -561,6 +574,23 @@ if os.getenv("SPOTIFY_RADIO_YTDLP") then
 	y2, took = next_sound(y1, 8000); run(2500)
 	check(y2 and yt() == "vid00000001", "YT: previous goes back to the track before: " .. tab.now_playing:GetText())
 
+	-- switching back and forth: each source carries on from what the game was playing when it was left
+	local yt_pos = radio.shown_position()
+	y1 = newest(); click(tab, "btn_to_spotify")
+	stopped = y1.stopped
+	y2, took = next_sound(y1, 8000); run(3000)
+	check(stopped and tab.title_spotify.shown and tab.btn_to_youtube.shown and tab.btn_playlists.shown, "SW: switching to Spotify stops YouTube in the same frame, and the PDA says Spotify")
+	local off = radio.shown_position() - 3000 - sp_pos
+	check(y2 and took < 3 and radio.shown.uri == sp_uri and spotify("playing") == "true" and math.abs(off) < 1500,
+		string.format("SW: Spotify plays on %.1f s later, from where it was left (%+.1f s): %s | %s", took, off / 1000, tab.now_playing:GetText(), tab.status:GetText()))
+	sample("back on Spotify")
+	y1 = newest(); click(tab, "btn_to_youtube")
+	y2, took = next_sound(y1, 8000); run(3000)
+	off = radio.shown_position() - 3000 - yt_pos
+	check(y2 and took < 1 and yt() == "vid00000001" and spotify("playing") == "false" and math.abs(off) < 1500,
+		string.format("SW: back on YouTube the track goes on %.1f s later, from where it was left (%+.1f s): %s", took, off / 1000, tab.status:GetText()))
+	sample("back on YouTube")
+
 	-- the list runs out: a radio of the last track plays on, without a break
 	y1 = newest(); click(tab, "btn_next"); y2 = next_sound(y1, 8000); run(1000)
 	check(yt() == "vid00000002", "YT: next once more: " .. tab.now_playing:GetText())
@@ -593,13 +623,16 @@ if os.getenv("SPOTIFY_RADIO_YTDLP") then
 	run(1500)
 	check(tab.now_playing:GetText() == "Nothing playing", "YT: and nothing plays: " .. tab.now_playing:GetText())
 
-	-- a Spotify result brings Spotify back
-	radio.search("burial"); run(1500)
-	y1 = newest(); click(tab, "row_play_1")
+	-- a Spotify result (from a search made before switching) brings Spotify back, switch and all
+	wait_for(function() return not tab.status:GetText():find("^!") end, 8000)   -- the error has had its time
+	y1 = newest(); stream.user("change"); radio.play_uri("spotify:track:2")
 	y2, took = next_sound(y1, 10000); run(3000)
-	check(y2 and radio.shown.uri:find("spotify:", 1, true) and spotify("playing") == "true",
+	check(y2 and radio.shown.uri == "spotify:track:2" and spotify("playing") == "true",
 		string.format("YT: a Spotify result brings Spotify back, heard %.1f s after the click: %s", took, tab.now_playing:GetText()))
-	check(not tab.status:GetText():find("YouTube"), "YT: the PDA no longer says YouTube: " .. tab.status:GetText())
+	check(not tab.status:GetText():find("YouTube") and tab.title_spotify.shown and tab.btn_to_youtube.shown,
+		"YT: the PDA no longer says YouTube and the switch is back on Spotify: " .. tab.status:GetText())
+	radio.search("yt creep"); run(1500)
+	check(tab.rows[1].text:GetText() == "[track] Creep - Radiohead (3:59)", "YT: \"yt ...\" in the search box still searches YouTube Music: " .. tab.rows[1].text:GetText())
 	run(2000)
 end
 run(12000)

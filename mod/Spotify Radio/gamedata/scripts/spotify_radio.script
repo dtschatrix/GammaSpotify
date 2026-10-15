@@ -14,6 +14,7 @@
 		spotify_radio.send("next")            -- any daemon command
 		spotify_radio.search("burial")        -- results arrive in spotify_radio.results
 		spotify_radio.play_uri(uri)
+		spotify_radio.switch_source("youtube")  -- "spotify" / "youtube", when the daemon has both
 		spotify_radio.subscribe(function(event, data) ... end)   -- "state" / "results" / "error"
 
 	The PDA screen lives in spotify_radio_ui.script.
@@ -45,14 +46,17 @@ state = {
 	artist = "", title = "", uri = "",
 	progress = 0, duration = 0,  -- ms
 	volume = -1, device = "", shuffle = false,
+	source = "",                 -- what the game hears: spotify | youtube ("" from an older daemon)
+	sources = {},                -- what the PDA's switch offers: { "spotify", "youtube" }
 	received_at = 0,             -- time_global() of the last update
 }
 -- What the PDA shows: the same as state, except that when the music runs through the game
 -- the track and position are those of the audio being heard, which is seconds behind Spotify.
 shown = { status = "offline", artist = "", title = "", progress = 0, duration = 0, volume = -1,
-          device = "", shuffle = false, uri = "", received_at = 0, heard = false }
+          device = "", shuffle = false, uri = "", received_at = 0, heard = false, source = "" }
 heard = function() return nil end -- replaced by spotify_radio_stream: track and position being heard
 local status_until = 0           -- a button was pressed: shown.status is ahead of Spotify until then
+local source_until = 0           -- the switch was flipped: shown.source is ahead of the daemon until then
 
 results = {}                     -- last search / playlist listing: { {kind=, uri=, title=, subtitle=}, ... }
 results_title = ""
@@ -114,13 +118,19 @@ local function split_tabs(line)
 	return t
 end
 
+-- "Spotify" or "YouTube": what the game hears (Spotify for an older daemon).
+function source_name()
+	return shown.source == "youtube" and "YouTube" or "Spotify"
+end
+
 function now_playing_text()
+	local src = source_name()
 	if shown.status == "offline" then return "Spotify: daemon not connected" end
 	if shown.status == "nodevice" then return "Spotify: nothing active - open the Spotify app" end
-	if shown.title == "" then return "Spotify: nothing playing" end
+	if shown.title == "" then return src .. ": nothing playing" end
 	local name = shown.artist ~= "" and (shown.artist .. " - " .. shown.title) or shown.title
-	if shown.status == "paused" then return "Spotify (paused): " .. name end
-	return "Spotify: " .. name
+	if shown.status == "paused" then return src .. " (paused): " .. name end
+	return src .. ": " .. name
 end
 
 -- Position in the track, in ms.
@@ -172,9 +182,15 @@ local function on_state(f)
 	state.device   = f[8] or ""
 	state.shuffle  = f[9] == "1"
 	state.uri      = f[10] or ""
+	state.source   = f[11] or ""
+	state.sources  = {}
+	for name in (f[12] or ""):gmatch("[^,]+") do state.sources[#state.sources + 1] = name end
 	state.received_at = time_global()
 
 	shown.volume, shown.device, shown.shuffle = state.volume, state.device, state.shuffle
+	if time_global() >= source_until or shown.source == state.source then
+		shown.source, source_until = state.source, 0
+	end
 	if time_global() >= status_until or shown.status == state.status then
 		shown.status, status_until = state.status, 0
 	end
@@ -419,6 +435,23 @@ end
 
 function request_playlists()
 	return send("playlists")
+end
+
+-- The daemon has Spotify and YouTube, both able to play in the game.
+function can_switch()
+	return #state.sources >= 2
+end
+
+-- The PDA's switch: "spotify" or "youtube". The daemon is told what is being heard on the source
+-- that is left, so that switching back carries on from there.
+function switch_source(name)
+	if name == shown.source then return true end
+	local line = "source " .. name
+	local m, pos = heard()
+	if m and m.uri ~= "" and not m.uri:find("%s") then line = line .. " " .. m.uri .. " " .. math.floor(pos) end
+	if not send(line) then return false end
+	shown.source, source_until = name, time_global() + 3000
+	return true
 end
 
 function subscribe(fn)

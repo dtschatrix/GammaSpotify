@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -8,7 +9,7 @@ namespace SpotifyRadio;
 /// <summary>
 /// Line protocol for the game, one command per line, tab-separated replies.
 ///   game -> daemon: hello | ping | state | toggle | play | pause | next | prev | vol N | volrel +-N |
-///                   shuffle on|off | search TEXT | playlists | playuri URI | queue URI |
+///                   shuffle on|off | search TEXT | playlists | playuri URI | queue URI | source NAME [URI MS] |
 ///                   stream start MODE FOLDER | stream stop | gamevol 0..100 | buf MS LAST [hold] | log TEXT
 ///   daemon -> game: hello | pong | state ... | ok CMD | error MSG | results_begin / result / results_end |
 ///                   chunk NAME MS INDEX | stream started MODE VOLUME | stream stopped|failed|unavailable|ended |
@@ -98,8 +99,13 @@ public sealed class GameServer
         ? _youtube ?? throw new SpotifyException("YouTube is not set up in this daemon (\"sources\" in config.json)")
         : _spotify ?? throw new SpotifyException("Spotify is not set up in this daemon (\"sources\" in config.json)");
 
-    /// <summary>Until the PDA has a source switch: Spotify's search and playlists if it is set up, YouTube's otherwise.</summary>
-    private IPlayer Searcher => _spotify ?? _youtube!;
+    /// <summary>The PDA's source switch: "spotify" or "youtube".</summary>
+    private static string IdOf(IPlayer player) => player is YouTubeSource ? "youtube" : "spotify";
+
+    /// <summary>The sources the switch offers: set up, and able to play through the game.</summary>
+    private IEnumerable<IPlayer> Switchable => new[] { _spotify, _youtube }
+        .Where(p => p is IAudioSource { Available: true })
+        .Select(p => p!);
 
     private DateTime _lastHeardUtc = DateTime.MinValue;
 
@@ -433,20 +439,26 @@ public sealed class GameServer
                 case "queue":
                     await PlayerFor(arg).QueueAsync(arg, ct);
                     break;
+                case "source":
+                    await SwitchAsync(arg, ct);
+                    await SendStateAsync(link, await Player.GetStateAsync(ct), ct);
+                    break;
                 case "search" when arg.StartsWith("yt ", StringComparison.OrdinalIgnoreCase):
-                    // until the PDA has a source switch: "yt ..." searches YouTube Music
+                    // "yt ..." searches YouTube Music whatever the switch is on
                     await SendResultsAsync(link, arg, await PlayerFor(YouTubeSource.VideoPrefix).SearchAsync(arg[3..].Trim(), ct), ct);
                     return;
                 case "search":
+                    // the source the switch is on, which is the one the game hears
                     if (arg.Length == 0) throw new SpotifyException("Empty search");
-                    await SendResultsAsync(link, arg, await Searcher.SearchAsync(arg, ct), ct);
+                    await SendResultsAsync(link, arg, await Player.SearchAsync(arg, ct), ct);
                     return;
                 case "playlists":
-                    await SendResultsAsync(link, "playlists", await Searcher.MyPlaylistsAsync(ct), ct);
+                    await SendResultsAsync(link, "playlists", await Player.MyPlaylistsAsync(ct), ct);
                     return;
                 default:
                     throw new SpotifyException("Unknown command: " + cmd);
             }
+            RememberSource();                        // playing something of the other source switches too
             await SendAsync(link, ct, "ok", cmd);
             _ = RefreshSoonAsync(ct);
         }
@@ -456,6 +468,36 @@ public sealed class GameServer
             Log.Info($"   error: {msg}");
             await SendAsync(link, ct, "error", msg);
         }
+    }
+
+    /// <summary>
+    /// "source spotify|youtube [URI MS]": the PDA's switch. URI and MS say what the game was playing
+    /// on the source it leaves, and where, so that switching back carries on from there.
+    /// </summary>
+    private async Task SwitchAsync(string arg, CancellationToken ct)
+    {
+        var parts = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var id = parts.Length > 0 ? parts[0].ToLowerInvariant() : "";
+        var target = id switch
+        {
+            "spotify" => _spotify ?? throw new SpotifyException("Spotify is not set up in this daemon (\"sources\" in config.json)"),
+            "youtube" => _youtube ?? throw new SpotifyException("YouTube is not set up in this daemon (\"sources\" in config.json)"),
+            _ => throw new SpotifyException("Unknown source: " + id),
+        };
+        if (Audio is not { } audio || target is not IAudioSource source || audio.IsCurrent(source)) return;
+        if (!source.Available) throw new SpotifyException(source.Missing);
+        if (parts.Length == 3 && double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var ms))
+            audio.Current.NoteHeard(parts[1], ms);
+        Log.Info($"Game audio: switched to {source.Name} in the PDA.");
+        await source.SwitchInAsync(ct);
+    }
+
+    /// <summary>The source the game hears is kept in the config, so the switch stays where it was left.</summary>
+    private void RememberSource()
+    {
+        if (Audio?.Current is not IPlayer p || _cfg.LastSource == IdOf(p)) return;
+        _cfg.LastSource = IdOf(p);
+        try { _cfg.Save(); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* kept for this run */ }
     }
 
     private static int ParseInt(string s) =>
@@ -474,7 +516,8 @@ public sealed class GameServer
 
     private Task SendStateAsync(ILink link, PlayerState s, CancellationToken ct) =>
         SendAsync(link, ct, "state", s.Status, s.Artist, s.Title, s.ProgressMs.ToString(), s.DurationMs.ToString(),
-            s.Volume.ToString(), s.Device, s.Shuffle ? "1" : "0", s.Uri);
+            s.Volume.ToString(), s.Device, s.Shuffle ? "1" : "0", s.Uri,
+            IdOf(Player), string.Join(",", Switchable.Select(IdOf)));   // where the switch is, and what it offers
 
     private string Format(params string[] fields) => string.Join('\t', fields.Select(_codec.Clean)) + "\n";
 
@@ -517,8 +560,9 @@ public sealed class GameServer
     private async Task PollOnceAsync(bool force, CancellationToken ct)
     {
         var state = await Player.PollAsync(ct);
-        if (!force && state.Signature == _lastSignature) return;
-        _lastSignature = state.Signature;
+        var signature = IdOf(Player) + state.Signature;
+        if (!force && signature == _lastSignature) return;
+        _lastSignature = signature;
         foreach (var link in ActiveLinks().ToList())
             await SendStateAsync(link, state, ct);
     }

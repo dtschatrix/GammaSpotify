@@ -53,6 +53,7 @@ try:
     state = wait(lambda l: l[0] == "state", 10)
     check(wait(lambda l: l[0] == "hello", 1) is not None and state and state[1] == "idle" and state[7] == "YouTube",
           "YouTube only: the daemon starts without any Spotify setup and says YouTube is idle: %s" % state)
+    check(state and state[10:12] == ["youtube", "youtube"], "the state says YouTube is on and there is nothing to switch to: %s" % (state and state[10:]))
 
     lines.clear(); send("search creep")
     end = wait(lambda l: l[0] == "results_end", 10)
@@ -98,6 +99,9 @@ try:
     lines.clear(); send("playuri spotify:track:1")
     err = wait(lambda l: l[0] == "error", 5)
     check(err and "Spotify is not set up" in err[1], "a Spotify address gets a clear error: %s" % (err and err[1]))
+    lines.clear(); send("source spotify")
+    err = wait(lambda l: l[0] == "error", 5)
+    check(err and "Spotify is not set up" in err[1], "and so does the switch: %s" % (err and err[1]))
 
     alive = False
     send("stream stop")

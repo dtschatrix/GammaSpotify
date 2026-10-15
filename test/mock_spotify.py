@@ -106,6 +106,7 @@ class H(BaseHTTPRequestHandler):
                     return self._send(403, {"error": {"status": 403, "message": "Player command failed: Restriction violated", "reason": "UNKNOWN"}})
                 else: do_act("play")
             elif act in ("pause", "next", "previous"): do_act(act)
+            elif act == "seek": do_act("seek", q["position_ms"][0])
             elif act == "volume": S["vol"] = int(q["volume_percent"][0])
             elif act == "shuffle": S["shuffle"] = q["state"][0] == "true"
             elif act == "queue": pass

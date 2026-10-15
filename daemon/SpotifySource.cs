@@ -28,6 +28,8 @@ public sealed class SpotifySource : IAudioSource, IPlayer
     private DateTime _lastStateUtc;
     private volatile bool _needMark;   // the game has not been told what this segment is
     private string _markUri = "";      // track the newest chunks belong to
+    private Heard? _heard;             // what the game was playing as the player switched away
+    private Heard? _resume;            // where to carry on when switched back to
 
     public SpotifySource(Config cfg, SpotifyClient spotify)
     {
@@ -257,9 +259,40 @@ public sealed class SpotifySource : IAudioSource, IPlayer
     /// <summary>YouTube is playing now: Spotify is paused, and librespot's audio is read and dropped.</summary>
     public async Task DeactivateAsync(CancellationToken ct)
     {
-        if ((await _spotify.GetStateAsync(ct)).Status != "playing") return;
+        var heard = Interlocked.Exchange(ref _heard, null);
+        var state = await _spotify.GetStateAsync(ct);
+        // Switched back to later, it carries on from what the game was playing, which is behind
+        // what librespot had read. Without the switch's note it carries on from where it stopped.
+        _resume = heard is { Fresh: true } h && h.Uri == state.Uri ? h : null;
+        if (state.Status != "playing") return;
         Log.Info("Game audio: pausing Spotify.");
         await _spotify.PauseAsync(ct);
+    }
+
+    public void NoteHeard(string uri, double posMs) => _heard = new Heard(uri, posMs, DateTime.UtcNow);
+
+    /// <summary>
+    /// The PDA's switch: Spotify becomes what the game hears and plays on, from what the game was
+    /// playing when the player switched away, if Spotify is still on that track.
+    /// </summary>
+    public async Task SwitchInAsync(CancellationToken ct)
+    {
+        if (IsCurrent) return;
+        if (_audio is not { Streaming: true })
+        {
+            // no stream (yet): the PDA's buttons and search go to Spotify, nothing else changes
+            await BecomeCurrentAsync(ct);
+            return;
+        }
+        var resume = Interlocked.Exchange(ref _resume, null);
+        var state = await _spotify.GetStateAsync(ct);
+        if (resume is not null && resume.Uri == state.Uri)
+            await _spotify.SeekAsync((int)resume.PosMs, ct);     // while still paused, so nothing old is heard
+        await BecomeCurrentAsync(ct);
+        if (state.Uri.Length > 0) await _spotify.PlayAsync(ct);
+        Log.Info(resume is not null && resume.Uri == state.Uri
+            ? $"Game audio: Spotify carries on at {resume.PosMs / 1000:0} s, where the game was."
+            : "Game audio: Spotify carries on.");
     }
 
     /// <summary>

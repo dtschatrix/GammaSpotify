@@ -1,8 +1,9 @@
 --[[
 	Spotify Radio - PDA screen.
 
-	Takes over the PDA "Radio" tab: now playing, transport buttons, search and
-	your playlists. All Spotify traffic goes through spotify_radio.script.
+	Takes over the PDA "Radio" tab: now playing, transport buttons, search, your
+	playlists and the Spotify / YouTube switch. All daemon traffic goes through
+	spotify_radio.script.
 
 	Set REPLACE_RADIO_TAB to false to get the vanilla radio tab back.
 ]]
@@ -61,7 +62,7 @@ function SpotifySearch:InitControls()
 
 	self.dialog = xml:InitStatic("search", self)
 	xml:InitStatic("search:background", self.dialog)
-	xml:InitStatic("search:caption", self.dialog)
+	self.caption = xml:InitStatic("search:caption", self.dialog):TextControl()
 
 	self.input = xml:InitEditBox("search:input", self.dialog)
 	self:Register(self.input, "fld_input")
@@ -80,6 +81,7 @@ function SpotifySearch:Reset()
 	-- Taking focus makes the engine send a "commit" from the box if it still held focus
 	-- from last time (closed with a button instead of Enter); self.ready ignores that one.
 	self.ready = false
+	self.caption:SetText(spotify_radio.source_name() == "YouTube" and "Search YouTube Music" or "Search Spotify")
 	self.input:SetText("")
 	self.input:CaptureFocus(true)
 	self.ready = true
@@ -144,6 +146,7 @@ function SpotifyTab:__init() super()
 	self.page = 1
 	self.pages = 1
 	self.seen_results = -1
+	self.seen_source = nil
 	self.next_refresh = 0
 	self:InitControls()
 	self:InitCallbacks()
@@ -162,7 +165,9 @@ function SpotifyTab:InitControls()
 
 	xml:InitFrame("frame_head", self)
 	xml:InitFrame("frame_list", self)
-	xml:InitStatic("title", self)
+	self.title_spotify = xml:InitStatic("title", self)
+	self.title_youtube = xml:InitStatic("title_youtube", self)
+	self.title_youtube:Show(false)
 
 	self.now_playing = xml:InitStatic("now_playing", self):TextControl()
 	self.status      = xml:InitStatic("status", self):TextControl()
@@ -182,7 +187,11 @@ function SpotifyTab:InitControls()
 	button("btn_vol_up")
 	button("btn_shuffle")
 	button("btn_search")
-	button("btn_playlists")
+	self.btn_playlists = button("btn_playlists")
+	self.btn_to_youtube = button("btn_to_youtube")
+	self.btn_to_spotify = button("btn_to_spotify")
+	self.btn_to_youtube:Show(false)
+	self.btn_to_spotify:Show(false)
 	self.btn_page_prev = button("btn_page_prev")
 	self.btn_page_next = button("btn_page_next")
 	self.btn_pause:Show(false)
@@ -233,6 +242,12 @@ function SpotifyTab:InitCallbacks()
 		spotify_radio.send("shuffle " .. (spotify_radio.state.shuffle and "off" or "on"))
 	end)
 	click("btn_search",    function() open_search() end)
+	-- the switch: what the game holds of the old source goes at once, like a track change
+	local function switch(name)
+		if spotify_radio.switch_source(name) then stream.place_here(); stream.user("change") end
+	end
+	click("btn_to_youtube", function() switch("youtube") end)
+	click("btn_to_spotify", function() switch("spotify") end)
 	click("btn_playlists", function() spotify_radio.request_playlists() end)
 	click("btn_page_prev", function() self:SetPage(self.page - 1) end)
 	click("btn_page_next", function() self:SetPage(self.page + 1) end)
@@ -282,7 +297,7 @@ function SpotifyTab:RenderRows()
 
 	local title
 	if self.seen_results <= 0 and #results == 0 then
-		title = "Search, or open one of your playlists"
+		title = self.seen_source == "youtube" and "Search YouTube Music" or "Search, or open one of your playlists"
 	elseif #results == 0 then
 		title = "Nothing found: " .. cut(spotify_radio.results_title, 22)
 	else
@@ -334,6 +349,19 @@ function SpotifyTab:Refresh()
 	local playing = s.status == "playing"
 	self.btn_play:Show(not playing)
 	self.btn_pause:Show(playing)
+
+	-- source: title, switch, and no "My playlists" for YouTube (it has none yet)
+	local youtube = s.source == "youtube"
+	local both = spotify_radio.can_switch() and s.status ~= "offline"
+	self.title_spotify:Show(not youtube)
+	self.title_youtube:Show(youtube)
+	self.btn_to_youtube:Show(both and not youtube)
+	self.btn_to_spotify:Show(both and youtube)
+	self.btn_playlists:Show(not youtube)
+	if s.source ~= self.seen_source then
+		self.seen_source = s.source
+		self:RenderRows()
+	end
 
 	if spotify_radio.results_version ~= self.seen_results then
 		self.seen_results = spotify_radio.results_version

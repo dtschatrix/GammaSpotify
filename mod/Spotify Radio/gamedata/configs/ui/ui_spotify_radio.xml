@@ -9,9 +9,23 @@
 		<texture>ui_inGame2_pda_buttons_background</texture>
 	</frame_list>
 
+	<!-- The source the game hears; the script shows one of the two titles. -->
 	<title x="46" y="145" width="200" height="18">
 		<text font="letterica16" r="30" g="215" b="96" a="255" vert_align="c">SPOTIFY</text>
 	</title>
+	<title_youtube x="46" y="145" width="200" height="18">
+		<text font="letterica16" r="235" g="50" b="50" a="255" vert_align="c">YOUTUBE MUSIC</text>
+	</title_youtube>
+
+	<!-- The source switch, shown when the daemon has both. -->
+	<btn_to_youtube x="200" y="139" width="150" height="24" stretch="1" check_mode="0">
+		<text font="letterica16">Switch to YouTube</text>
+		<texture>ui_button_ordinary</texture>
+	</btn_to_youtube>
+	<btn_to_spotify x="200" y="139" width="150" height="24" stretch="1" check_mode="0">
+		<text font="letterica16">Switch to Spotify</text>
+		<texture>ui_button_ordinary</texture>
+	</btn_to_spotify>
 
 	<now_playing x="46" y="162" width="540" height="24">
 		<text font="letterica18" r="220" g="220" b="220" a="255" vert_align="c"/>

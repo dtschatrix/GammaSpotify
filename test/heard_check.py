@@ -1,7 +1,7 @@
 # Checks what the PDA showed against what was actually playing. The harness noted, at several
 # moments, the chunk the fake engine was in, how far into it, and the track and time on the PDA.
 # fake_librespot plays track N at position P from (N * 17 s + P) of the test audio, so the chunk
-# is located in the test audio and compared.
+# is located in the test audio and compared. YouTube tracks are cut from it too (fake_ytdlp.sh).
 import numpy as np, subprocess, os, sys
 notes = sys.argv[1]; chunks = notes[:-len(".heard")] + ".chunks"; SR = 44100
 st = np.frombuffer(open("test_audio.raw", "rb").read(), "<i2").reshape(-1, 2) / 32767
@@ -13,7 +13,12 @@ for line in open(notes):
     if len(y) == 2 * SR: y = y.reshape(-1, 2).mean(axis=1)   # head mode chunks are stereo
     # where this chunk sits in the (looping) test audio
     corr = np.fft.irfft(np.fft.rfft(y, n) * F, n)
-    claimed = ((int(uri.rsplit(":", 1)[1]) - 1) * 17000 + int(shown)) % 60000
+    if uri.startswith("yt:video:"):   # fake_ytdlp.sh: yt_long.wav is the test audio from 0 s, yt_short.wav from 20 s
+        vid = uri[len("yt:video:"):]
+        base = 0 if vid == "vid00000001" or vid.startswith("once") else 20000
+    else:
+        base = (int(uri.rsplit(":", 1)[1]) - 1) * 17000
+    claimed = (base + int(shown)) % 60000
     # The test music repeats its chords, so a chunk can fit about as well a few bars away.
     # Among the places it fits, take the one nearest to what the PDA claims.
     fits = np.flatnonzero(corr >= 0.8 * corr.max())

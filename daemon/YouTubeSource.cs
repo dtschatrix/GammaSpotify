@@ -47,8 +47,53 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
         public double StartMs { get; set; }  // where this ffmpeg started in the track
         public long Bytes { get; set; }      // PCM this ffmpeg has given
         public int Restarts { get; set; }
-        public double PositionMs => StartMs + Bytes / BytesPerMs;
+
+        /// <summary>Where the audio handed out next is in the track.</summary>
+        public double PositionMs => StartMs + (Bytes - ReplayLeft) / BytesPerMs;
+
+        // The last few seconds read, so that after a switch to another source and back the track
+        // carries on from what the game was playing, which is behind what was read.
+        private byte[]? _recent;
+        private long _recentCount;
+        public double? ResumeAtMs { get; set; }  // parked: where the game was in the track
+        public byte[]? Replay { get; private set; }
+        public int ReplayAt { get; set; }
+        public int ReplayLeft => Replay is null ? 0 : Replay.Length - ReplayAt;
+
+        public void Keep(ReadOnlySpan<byte> pcm)
+        {
+            _recent ??= new byte[RecentBytes];
+            if (pcm.Length >= _recent.Length)
+            {
+                _recentCount += pcm.Length - _recent.Length;
+                pcm = pcm[^_recent.Length..];
+            }
+            var at = (int)(_recentCount % _recent.Length);
+            var first = Math.Min(pcm.Length, _recent.Length - at);
+            pcm[..first].CopyTo(_recent.AsSpan(at));
+            pcm[first..].CopyTo(_recent);
+            _recentCount += pcm.Length;
+        }
+
+        /// <summary>Hands out the last <paramref name="ms"/> read once more before going on (whole frames, as much as was kept).</summary>
+        public void Rewind(double ms)
+        {
+            if (_recent is null) return;
+            var n = (int)Math.Min(Math.Max(0, ms) * BytesPerMs, Math.Min(_recentCount, _recent.Length)) / 4 * 4;
+            if (n == 0) return;
+            var replay = new byte[n];
+            var start = (int)((_recentCount - n) % _recent.Length);
+            var first = Math.Min(n, _recent.Length - start);
+            _recent.AsSpan(start, first).CopyTo(replay);
+            _recent.AsSpan(0, n - first).CopyTo(replay.AsSpan(first));
+            Replay = replay;
+            ReplayAt = 0;
+        }
+
+        public void ReplayDone() => Replay = null;
     }
+
+    private static readonly int RecentBytes = (int)(16000 * BytesPerMs) / 4 * 4; // the game holds up to LeadMs (6 s) plus a little
 
     private readonly Config _cfg;
     private readonly HttpClient _http;
@@ -69,6 +114,8 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
     private Track? _track;                   // being read
     private Item? _shown;                    // what the PDA shows: playing, or being opened
     private bool _paused;
+    private Track? _parked;                  // another source took over: the track, its ffmpeg left unread
+    private Heard? _heard;                   // what the game was playing as the player switched away
     private int _gen;                        // bumped by every change the player asks for
     private long _outBytes;                  // PCM handed to the streamer since the pump started
     private readonly List<Boundary> _boundaries = new();
@@ -132,9 +179,10 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
 
     public void Kill()
     {
-        Track? t;
-        lock (_sync) t = _track;
+        Track? t, parked;
+        lock (_sync) (t, parked) = (_track, _parked);
         KillProcess(t?.Process);
+        KillProcess(parked?.Process);
     }
 
     /// <summary>The pump's read: PCM of the track being played. Waits while paused or while nothing plays.</summary>
@@ -150,6 +198,16 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
                 track = _paused ? null : _track;
                 pipe = track?.Pipe;
                 wake = _wake.Task;
+                if (track?.Replay is { } replay)
+                {
+                    // back from another source: what was read but not heard comes once more
+                    var k = Math.Min(buffer.Length / 4 * 4, replay.Length - track.ReplayAt);
+                    replay.AsSpan(track.ReplayAt, k).CopyTo(buffer.Span);
+                    track.ReplayAt += k;
+                    if (track.ReplayAt >= replay.Length) track.ReplayDone();
+                    _outBytes += k;
+                    return k;
+                }
             }
             if (track is null || pipe is null)
             {
@@ -163,10 +221,20 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
 
             lock (_sync)
             {
-                // Changed while reading: what came is the old audio and is not handed out.
-                if (!ReferenceEquals(_track, track) || !ReferenceEquals(track.Pipe, pipe)) continue;
+                if (!ReferenceEquals(_track, track) || !ReferenceEquals(track.Pipe, pipe))
+                {
+                    // Changed while reading: what came is the old audio and is not handed out. If
+                    // the track was only parked, it is still the track's own and comes after the replay.
+                    if (n > 0 && ReferenceEquals(_parked, track) && ReferenceEquals(track.Pipe, pipe))
+                    {
+                        track.Keep(buffer.Span[..n]);
+                        track.Bytes += n;
+                    }
+                    continue;
+                }
                 if (n > 0)
                 {
+                    track.Keep(buffer.Span[..n]);
                     track.Bytes += n;
                     _outBytes += n;
                     return n;
@@ -330,7 +398,7 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
     private async Task StartAtPosAsync(double startMs, CancellationToken ct)
     {
         Item? item;
-        Track? old;
+        Track? old, parked;
         long cut;
         int gen;
         lock (_sync)
@@ -338,6 +406,8 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
             gen = ++_gen;
             old = _track;
             _track = null;
+            parked = _parked;
+            _parked = null;
             item = _pos >= 0 && _pos < _list.Count ? _list[_pos] : null;
             _shown = item;
             _paused = false;
@@ -346,6 +416,7 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
             Wake();
         }
         KillProcess(old?.Process);
+        KillProcess(parked?.Process);
         await Audio.StartOverAsync(this, "new track", cut, ct);
         if (item is not null) _ = Task.Run(() => OpenAsync(item, startMs, gen), CancellationToken.None);
     }
@@ -472,6 +543,15 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
 
     public async Task PlayAsync(CancellationToken ct)
     {
+        bool parked;
+        lock (_sync) parked = _parked is not null && _track is null;
+        if (parked && IsCurrent && _audio is { Streaming: true })
+        {
+            // switched to while the game had no stream: the parked track plays on now
+            await _changeGate.WaitAsync(ct);
+            try { if (await UnparkAsync(ct)) return; }
+            finally { _changeGate.Release(); }
+        }
         bool was;
         lock (_sync)
         {
@@ -547,6 +627,8 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
     {
         lock (_sync)
         {
+            if (_shown is null && _parked is { } parked)       // switched to without a stream: play carries on with it
+                return Task.FromResult(StateOf(Meta(parked.Item.Id), parked.ResumeAtMs ?? parked.PositionMs, "paused"));
             if (_shown is not { } shown)
                 return Task.FromResult(new PlayerState("idle", "", "", "", 0, 0, _cfg.GameVolume, Name, _shuffle));
             var item = Meta(shown.Id);
@@ -590,22 +672,92 @@ public sealed class YouTubeSource : IAudioSource, IPlayer
         return Task.CompletedTask;
     }
 
-    /// <summary>Spotify plays now: stop, and forget what was playing.</summary>
+    /// <summary>
+    /// Spotify plays now: stop. The track is parked: its ffmpeg is left as it is, unread, so that
+    /// switching back carries on at once from what the game was playing. A track still being
+    /// looked up is dropped.
+    /// </summary>
     public Task DeactivateAsync(CancellationToken ct)
     {
-        Track? old;
+        Track? old, parked;
         lock (_sync)
         {
             _gen++;
+            parked = _parked;
+            _parked = null;
             old = _track;
             _track = null;
+            var heard = _heard is { Fresh: true } h ? h : null;
+            _heard = null;
+            if (old is not null && _pos >= 0 && _pos < _list.Count && _list[_pos].Id == old.Item.Id)
+            {
+                // the game was in this track (else in the end of the one before: this one from its start)
+                old.ResumeAtMs = heard is null ? old.PositionMs - _cfg.LeadMs
+                    : heard.Uri == VideoPrefix + old.Item.Id ? heard.PosMs : old.StartMs;
+                _parked = old;
+                old = null;
+            }
             _shown = null;
             _paused = false;
             Wake();
         }
         KillProcess(old?.Process);
+        KillProcess(parked?.Process);
         Log.Info("YouTube: stopped.");
         return Task.CompletedTask;
+    }
+
+    public void NoteHeard(string uri, double posMs)
+    {
+        lock (_sync) _heard = new Heard(uri, posMs, DateTime.UtcNow);
+    }
+
+    /// <summary>
+    /// The PDA's switch: YouTube becomes what the game hears and carries on with the parked track,
+    /// if there is one; otherwise the game goes quiet until something is chosen.
+    /// </summary>
+    public async Task SwitchInAsync(CancellationToken ct)
+    {
+        if (!Available) throw NotSetUp();
+        await _changeGate.WaitAsync(ct);
+        try
+        {
+            if (IsCurrent) return;
+            if (Audio.Streaming && await UnparkAsync(ct)) return;
+            long cut;
+            lock (_sync) cut = _outBytes;
+            await Audio.StartOverAsync(this, "switched to YouTube", cut, ct);
+        }
+        finally { _changeGate.Release(); }
+    }
+
+    /// <summary>The parked track plays on, from what the game was playing. Called with _changeGate held.</summary>
+    private async Task<bool> UnparkAsync(CancellationToken ct)
+    {
+        Track? track;
+        long cut;
+        lock (_sync)
+        {
+            track = _parked;
+            if (track is null) return false;
+            _parked = null;
+            _gen++;
+            cut = _outBytes;
+        }
+        // made current first: nothing of it may be handed out before the streamer takes it as new
+        await Audio.StartOverAsync(this, "back to YouTube", cut, ct);
+        lock (_sync)
+        {
+            track.Rewind(track.PositionMs - (track.ResumeAtMs ?? track.PositionMs));
+            track.ResumeAtMs = null;
+            _track = track;
+            _shown = track.Item;
+            _paused = false;
+            AddBoundary(cut, track.Item.Id, track.PositionMs);
+            Wake();
+        }
+        Log.Info($"YouTube: {track.Item.Artist} - {track.Item.Title}, on from {track.PositionMs / 1000:0} s.");
+        return true;
     }
 
     public void OnNewSegment() { }

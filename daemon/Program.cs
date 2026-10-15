@@ -129,9 +129,10 @@ try
     }
     var youtube = cfg.Wants("youtube") ? new YouTubeSource(cfg, http) : null;
 
+    // the first one that can play is what the game hears at the start: where the PDA's switch was left
     var sources = new List<IAudioSource>();
     if (spotifySource is not null) sources.Add(spotifySource);
-    if (youtube is not null) sources.Add(youtube);
+    if (youtube is not null) sources.Insert(cfg.LastSource == "youtube" ? 0 : sources.Count, youtube);
     var server = new GameServer(cfg, spotifySource, youtube, new TextCodec(cfg.Encoding));
     var audio = new GameAudio(cfg, sources, server.BroadcastAsync, () => server.GameQuiet);
     server.Audio = audio;
