@@ -102,10 +102,14 @@ local function report(msg)
 end
 
 -- Remove chunks left in gamedata\sounds\spotify_radio by an earlier session.
+-- The folder only exists once a chunk has been moved there. On a missing folder file_list_open
+-- still returns a list object, wrapped around a null pointer: Size() then crashes inside the
+-- engine ("Busy Hands" window), and pcall does not catch that. So check for the folder first.
 local function delete_leftovers()
 	local fs = getFS()
+	if not fs:exist("$game_sounds$", DIR .. "\\") then return end
 	local list = fs:file_list_open("$game_sounds$", DIR .. "\\", bit_or(FS.FS_ListFiles, FS.FS_RootOnly))
-	local count = list and list:Size() or 0
+	local count = list:Size()
 	for i = 0, count - 1 do
 		fs:file_delete(fs:update_path("$game_sounds$", DIR .. "\\" .. list:GetAt(i)))
 	end
